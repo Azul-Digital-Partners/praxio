@@ -6,6 +6,7 @@ import { RightPanel } from '@/components/praxio/RightPanel'
 import { ConversationThread } from '@/components/praxio/ConversationThread'
 import { useWebSocket } from '@/hooks/praxio/useWebSocket'
 import { useConversation } from '@/hooks/praxio/useConversation'
+import { useTheme } from '@/context/ThemeContext'
 
 const MOCK_AGENTS: AgentSummary[] = [
   { id: '1', name: 'Rosalind', role: 'Chief of Staff', status: 'live', budgetRemaining: 180, budgetCap: 200 },
@@ -20,16 +21,8 @@ export function Conversations() {
   const { ws, send } = useWebSocket('/ws')
   const { messages, addUserMessage } = useConversation(ws, selectedId)
 
-  const [isDark, setIsDark] = useState(() =>
-    localStorage.getItem('praxio.theme') !== 'light'
-  )
-
-  function toggleTheme() {
-    const next = !isDark
-    setIsDark(next)
-    localStorage.setItem('praxio.theme', next ? 'dark' : 'light')
-    document.documentElement.classList.toggle('dark', next)
-  }
+  const { theme, toggleTheme } = useTheme()
+  const isDark = theme === 'dark'
 
   function handleSend(content: string) {
     addUserMessage(content)

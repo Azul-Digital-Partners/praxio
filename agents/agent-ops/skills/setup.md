@@ -22,6 +22,9 @@ For each stated integration, verify:
 # Example for an API integration:
 curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $API_KEY" https://api.example.com/me
 ```
+
+> Replace `$API_KEY` with the actual credential name for the integration and `https://api.example.com/me` with its health-check or minimal read endpoint. If no health-check endpoint exists, use the smallest read operation the API supports (e.g., `GET /me`, `GET /status`, `GET /users?limit=1`).
+
 Record: Connected / Failed / Missing credentials for each.
 
 **Step 3 — Capability boundary definition**
@@ -48,7 +51,14 @@ Flag anything missing. Do not proceed past this step if SKILL.md is absent.
 
 **Step 6 — Test invocation**
 
-Send one sample task appropriate to the agent's role. Record: did the response make sense? Did the agent try to do something outside its boundary?
+Send one sample task appropriate to the agent's role. Record the response.
+
+**Pass criteria (all must be met):**
+- The response addresses the task directly
+- No tool or action falls outside the agent's Owns boundary
+- No credential or system access beyond the declared System Access section is referenced
+
+If any condition fails, flag it and do not write the setup record with `Status: Ready`. Record the failure and what would need to change.
 
 **Step 7 — Org chart registration**
 
@@ -105,7 +115,7 @@ Ask: "What command triggers this skill? What does the input look like? Show me a
 
 **Step 3 — Connection check**
 
-Does this skill need integrations beyond the parent agent's existing access? If yes, list them and flag for connection validation in Step 2 of the agent setup flow (run it for this skill's gaps).
+Does this skill need integrations beyond the parent agent's existing access? If yes, block skill registration until the new integrations are provisioned and validated. Record each missing integration as `Pending: [integration name]` in the registry entry (Step 5). Do not mark the skill as registered until all Pending entries are resolved.
 
 **Step 4 — Test invocation**
 

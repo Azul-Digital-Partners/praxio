@@ -7,8 +7,12 @@ export function gradesRouter(_db: Db) {
   const router = Router();
 
   router.post("/", async (req, res) => {
-    const { conversationId, grade } = req.body as { conversationId?: string; grade?: string };
-    if (!conversationId || !VALID_GRADES.includes(grade as (typeof VALID_GRADES)[number])) {
+    const { conversationId, grade } = req.body ?? {};
+    if (
+      typeof conversationId !== 'string' ||
+      !conversationId ||
+      !VALID_GRADES.includes(grade as (typeof VALID_GRADES)[number])
+    ) {
       res.status(400).json({ error: "Invalid conversationId or grade" });
       return;
     }

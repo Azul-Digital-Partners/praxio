@@ -20,10 +20,12 @@ export function SessionGrading({ conversationId, onGrade }: SessionGradingProps)
   function handleSelect(grade: Grade) {
     setSelected(grade)
     onGrade(grade)
-    void fetch('/api/grades', {
+    fetch('/api/grades', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversationId, grade }),
+    }).catch((err) => {
+      console.error('Failed to persist grade:', err)
     })
   }
 

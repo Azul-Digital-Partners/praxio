@@ -13,10 +13,14 @@ export function RightPanel({ agent, conversationId }: RightPanelProps) {
 
   useEffect(() => {
     if (!agent) return
-    fetch(`/api/playbook/${agent.id}`)
+    const controller = new AbortController()
+    fetch(`/api/playbook/${agent.id}`, { signal: controller.signal })
       .then((r) => (r.ok ? r.text() : null))
       .then(setPlaybookContent)
-      .catch(() => setPlaybookContent(null))
+      .catch((err) => {
+        if (err.name !== 'AbortError') setPlaybookContent(null)
+      })
+    return () => controller.abort()
   }, [agent?.id])
 
   if (!agent) return (
@@ -36,7 +40,7 @@ export function RightPanel({ agent, conversationId }: RightPanelProps) {
       {conversationId && (
         <SessionGrading
           conversationId={conversationId}
-          onGrade={(grade) => console.log('Graded:', grade)}
+          onGrade={(_grade) => { /* Phase 2: propagate to session state */ }}
         />
       )}
 

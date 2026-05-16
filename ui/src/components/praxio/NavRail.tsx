@@ -1,5 +1,6 @@
 import { MessageSquare, Users, BookOpen, BarChart2 } from 'lucide-react'
 import { gradients } from '@/theme'
+import { ThemeToggle } from './ThemeToggle'
 
 const navItems = [
   { icon: MessageSquare, label: 'Conversations', href: '#conversations' },
@@ -8,7 +9,12 @@ const navItems = [
   { icon: BarChart2, label: 'Analytics', href: '#analytics' },
 ]
 
-export function NavRail() {
+interface NavRailProps {
+  isDark: boolean
+  onToggle: () => void
+}
+
+export function NavRail({ isDark, onToggle }: NavRailProps) {
   return (
     <nav
       className="flex h-full w-14 flex-col items-center py-4 gap-6"
@@ -27,6 +33,7 @@ export function NavRail() {
           </a>
         ))}
       </div>
+      <ThemeToggle isDark={isDark} onToggle={onToggle} />
     </nav>
   )
 }

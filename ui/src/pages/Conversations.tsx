@@ -20,6 +20,17 @@ export function Conversations() {
   const { ws, send } = useWebSocket('/ws')
   const { messages, addUserMessage } = useConversation(ws, selectedId)
 
+  const [isDark, setIsDark] = useState(() =>
+    localStorage.getItem('praxio.theme') !== 'light'
+  )
+
+  function toggleTheme() {
+    const next = !isDark
+    setIsDark(next)
+    localStorage.setItem('praxio.theme', next ? 'dark' : 'light')
+    document.documentElement.classList.toggle('dark', next)
+  }
+
   function handleSend(content: string) {
     addUserMessage(content)
     send({ type: 'message', agentId: selectedId, content })
@@ -27,7 +38,7 @@ export function Conversations() {
 
   return (
     <PraxioLayout
-      navRail={<NavRail />}
+      navRail={<NavRail isDark={isDark} onToggle={toggleTheme} />}
       sidebar={
         <AgentSidebar
           agents={MOCK_AGENTS}

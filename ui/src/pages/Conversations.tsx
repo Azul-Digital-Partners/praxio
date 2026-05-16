@@ -3,6 +3,9 @@ import { PraxioLayout } from '@/components/praxio/Layout'
 import { NavRail } from '@/components/praxio/NavRail'
 import { AgentSidebar, type AgentSummary } from '@/components/praxio/AgentSidebar'
 import { RightPanel } from '@/components/praxio/RightPanel'
+import { ConversationThread } from '@/components/praxio/ConversationThread'
+import { useWebSocket } from '@/hooks/praxio/useWebSocket'
+import { useConversation } from '@/hooks/praxio/useConversation'
 
 const MOCK_AGENTS: AgentSummary[] = [
   { id: '1', name: 'Rosalind', role: 'Chief of Staff', status: 'live', budgetRemaining: 180, budgetCap: 200 },
@@ -14,6 +17,13 @@ const MOCK_AGENTS: AgentSummary[] = [
 export function Conversations() {
   const [selectedId, setSelectedId] = useState<string | null>('1')
   const selectedAgent = MOCK_AGENTS.find((a) => a.id === selectedId) ?? null
+  const { ws, send } = useWebSocket('/ws')
+  const { messages, addUserMessage } = useConversation(ws, selectedId)
+
+  function handleSend(content: string) {
+    addUserMessage(content)
+    send({ type: 'message', agentId: selectedId, content })
+  }
 
   return (
     <PraxioLayout
@@ -26,9 +36,12 @@ export function Conversations() {
         />
       }
       main={
-        <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-          Select an agent and send a message — conversation thread coming in Task 9
-        </div>
+        <ConversationThread
+          messages={messages}
+          onSend={handleSend}
+          streaming={messages.some((m) => m.streaming)}
+          agentName={selectedAgent?.name}
+        />
       }
       rightPanel={<RightPanel agent={selectedAgent} />}
     />

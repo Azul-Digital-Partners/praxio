@@ -24,6 +24,17 @@ export function attachWebSocketServer(httpServer: Server): WebSocketServer {
         ws.send(JSON.stringify({ type: 'pong' }))
       }
 
+      if (msg.type === 'message' && typeof msg.content === 'string') {
+        const conversationId = typeof msg.agentId === 'string' ? msg.agentId : 'unknown'
+        // Phase 1 stub: echo content back as a streaming response
+        const words = msg.content.split(' ')
+        for (const word of words) {
+          await sendChat({ type: 'chunk', content: word + ' ' })
+          await new Promise((r) => setTimeout(r, 60))
+        }
+        await sendChat({ type: 'done', conversationId })
+      }
+
       if (
         msg.type === 'presence_update' &&
         typeof msg.agentId === 'string' &&

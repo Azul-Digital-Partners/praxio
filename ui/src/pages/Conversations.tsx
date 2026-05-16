@@ -47,7 +47,7 @@ export function Conversations() {
           agentName={selectedAgent?.name}
         />
       }
-      rightPanel={<RightPanel agent={selectedAgent} />}
+      rightPanel={<RightPanel agent={selectedAgent} conversationId={selectedId ?? undefined} />}
     />
   )
 }

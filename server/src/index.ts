@@ -22,6 +22,7 @@ import {
   companies,
   companyMemberships,
   instanceUserRoles,
+  type Db,
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
@@ -627,7 +628,7 @@ export async function startServer(): Promise<StartedServer> {
   server.keepAliveTimeout = 185000;
   server.headersTimeout = 186000;
 
-  attachWebSocketServer(server);
+  attachWebSocketServer(server, db as Db);
   
   if (listenPort !== requestedListenPort) {
     logger.warn(`Requested port is busy; using next free port (requestedPort=${requestedListenPort}, selectedPort=${listenPort})`);

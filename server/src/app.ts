@@ -217,8 +217,7 @@ export async function createApp(
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
   api.use("/grades", gradesRouter(db));
-  const agentsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../agents");
-  api.use("/playbook", playbookRouter(agentsDir));
+  api.use("/playbook", playbookRouter(db));
   const pluginRegistry = pluginRegistryService(db);
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);

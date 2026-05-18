@@ -1,23 +1,46 @@
 import { Router } from "express";
 import fs from "node:fs";
-import path from "node:path";
+import { agents } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import type { Db } from "@paperclipai/db";
 
-export function playbookRouter(agentsDir: string) {
+function asString(v: unknown): string | null {
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+export function playbookRouter(db: Db) {
   const router = Router();
 
-  router.get("/:agentSlug", async (req, res) => {
-    const { agentSlug } = req.params;
-    if (!/^[a-z0-9-]+$/.test(agentSlug)) {
-      res.status(400).json({ error: "Invalid agent slug" });
+  router.get("/:agentId", async (req, res) => {
+    const { agentId } = req.params;
+
+    const agent = await db
+      .select({ adapterConfig: agents.adapterConfig })
+      .from(agents)
+      .where(eq(agents.id, agentId))
+      .then((rows) => rows[0] ?? null);
+
+    if (!agent) {
+      res.status(404).json({ error: "Agent not found" });
       return;
     }
-    const skillPath = path.join(agentsDir, agentSlug, "SKILL.md");
+
+    const config = typeof agent.adapterConfig === "object" && agent.adapterConfig !== null
+      ? (agent.adapterConfig as Record<string, unknown>)
+      : {};
+
+    const filePath = asString(config.instructionsFilePath);
+    if (!filePath) {
+      res.status(404).json({ error: "No instructions file configured for this agent" });
+      return;
+    }
+
     try {
-      const content = await fs.promises.readFile(skillPath, "utf-8");
+      const content = await fs.promises.readFile(filePath, "utf-8");
       res.type("text/plain").send(content);
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        res.status(404).json({ error: "Playbook not found" });
+        res.status(404).json({ error: "Playbook file not found on disk" });
       } else {
         res.status(500).json({ error: "Failed to read playbook" });
       }

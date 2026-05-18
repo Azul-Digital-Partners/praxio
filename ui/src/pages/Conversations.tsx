@@ -9,14 +9,14 @@ import { useConversation } from '@/hooks/praxio/useConversation'
 import { useTheme } from '@/context/ThemeContext'
 
 const MOCK_AGENTS: AgentSummary[] = [
-  { id: '1', name: 'Rosalind', role: 'Chief of Staff', status: 'live', budgetRemaining: 180, budgetCap: 200 },
-  { id: '2', name: 'Engineering', role: 'Technical Lead', status: 'idle', budgetRemaining: 95, budgetCap: 150 },
-  { id: '3', name: 'Marketing', role: 'Creative Lead', status: 'idle', budgetRemaining: 60, budgetCap: 100 },
-  { id: '4', name: 'Agent Ops', role: 'Workforce Manager', status: 'idle', budgetRemaining: 40, budgetCap: 75 },
+  { id: '7e8e691b-25d5-4d9e-b01e-1b4455270abf', name: 'Rosalind', role: 'Chief of Staff', status: 'idle', budgetRemaining: 180, budgetCap: 200 },
+  { id: 'cc94286b-75b2-438a-bc7d-2dd00826ce43', name: 'Engineering', role: 'Technical Lead', status: 'idle', budgetRemaining: 95, budgetCap: 150 },
+  { id: 'f3101599-c0bc-49ff-916a-63e3356cd2a4', name: 'Marketing', role: 'Creative Lead', status: 'idle', budgetRemaining: 60, budgetCap: 100 },
+  { id: '4cbab473-d2da-4e4b-8eb1-9a80018b2861', name: 'Agent Ops', role: 'Workforce Manager', status: 'idle', budgetRemaining: 40, budgetCap: 75 },
 ]
 
 export function Conversations() {
-  const [selectedId, setSelectedId] = useState<string | null>('1')
+  const [selectedId, setSelectedId] = useState<string | null>('7e8e691b-25d5-4d9e-b01e-1b4455270abf')
   const selectedAgent = MOCK_AGENTS.find((a) => a.id === selectedId) ?? null
   const { ws, send } = useWebSocket('/ws')
   const { messages, addUserMessage } = useConversation(ws, selectedId)

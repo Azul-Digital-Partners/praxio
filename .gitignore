@@ -60,3 +60,4 @@ playwright-report/
 .superset/
 .superpowers/
 .claude/worktrees/
+.worktrees/

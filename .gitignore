@@ -54,6 +54,10 @@ tests/e2e/test-results/
 tests/e2e/playwright-report/
 tests/release-smoke/test-results/
 tests/release-smoke/playwright-report/
+# Root-level Playwright (Praxio UI e2e)
+test-results/
+playwright-report/
 .superset/
 .superpowers/
 .claude/worktrees/
+.worktrees/

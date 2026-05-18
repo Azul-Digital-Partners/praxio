@@ -1,0 +1,989 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Praxio — Features by Capability Group</title>
+  <style>
+    :root {
+      --navy: #0B1F3A;
+      --blue: #4B9CD3;
+      --green: #1a7a4a;
+      --amber: #b45309;
+      --red: #c0392b;
+      --purple: #6b21a8;
+      --teal: #0d9488;
+      --slate: #475569;
+      --surface: #f8fafc;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --muted: #64748b;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--surface); color: var(--text); font-size: 14px; line-height: 1.5; }
+
+    /* HEADER */
+    .header { background: var(--navy); color: white; padding: 28px 40px 24px; }
+    .header h1 { font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+    .header .sub { color: #94a3b8; font-size: 13px; margin-top: 4px; }
+
+    /* LEGEND */
+    .legend { display: flex; gap: 12px; flex-wrap: wrap; margin: 20px 40px 0; padding: 12px 16px; background: white; border: 1px solid var(--border); border-radius: 8px; }
+    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
+
+    /* SUMMARY BAND */
+    .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; padding: 20px 40px; background: white; border-bottom: 1px solid var(--border); }
+    .summary-stat .num { font-size: 26px; font-weight: 800; color: var(--navy); line-height: 1; }
+    .summary-stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-top: 4px; }
+    .summary-stat .detail { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+
+    /* MAIN */
+    .main { padding: 28px 40px; max-width: 1400px; }
+
+    /* FEATURE GROUP */
+    .group { margin-bottom: 40px; }
+    .group-header { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 3px solid var(--border); }
+    .group-icon { width: 36px; height: 36px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+    .group-header h2 { font-size: 17px; font-weight: 700; color: var(--navy); }
+    .group-header .group-desc { font-size: 12px; color: var(--muted); margin-top: 1px; }
+
+    /* GROUP ACCENT COLORS */
+    .group-convo .group-icon    { background: #dbeafe; }
+    .group-agents .group-icon   { background: #f3e8ff; }
+    .group-tasks .group-icon    { background: #dcfce7; }
+    .group-realtime .group-icon { background: #ccfbf1; }
+    .group-quality .group-icon  { background: #fef9c3; }
+    .group-budget .group-icon   { background: #fef3c7; }
+    .group-platform .group-icon { background: #f1f5f9; }
+    .group-future .group-icon   { background: #fce7f3; }
+
+    .group-convo    { border-left: 4px solid #2563eb; padding-left: 16px; }
+    .group-agents   { border-left: 4px solid #7c3aed; padding-left: 16px; }
+    .group-tasks    { border-left: 4px solid #16a34a; padding-left: 16px; }
+    .group-realtime { border-left: 4px solid #0d9488; padding-left: 16px; }
+    .group-quality  { border-left: 4px solid #d97706; padding-left: 16px; }
+    .group-budget   { border-left: 4px solid #b45309; padding-left: 16px; }
+    .group-platform { border-left: 4px solid var(--slate); padding-left: 16px; }
+    .group-future   { border-left: 4px solid #db2777; padding-left: 16px; }
+
+    /* GRID */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+
+    /* CARDS */
+    .card { background: white; border: 1px solid var(--border); border-radius: 8px; padding: 16px 16px 36px 16px; position: relative; }
+    .card.star { border-left: 4px solid #7c3aed; background: #faf5ff; }
+    .card-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+    .card-title { font-size: 13px; font-weight: 700; color: var(--navy); flex: 1; }
+    .card-desc { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 10px; }
+    .card-footer { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+    /* TAGS */
+    .tag { font-size: 10px; font-weight: 600; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+    .tag-p0      { background: #fee2e2; color: #b91c1c; }
+    .tag-p1      { background: #ffedd5; color: #c2410c; }
+    .tag-p2      { background: #fef9c3; color: #92400e; }
+    .tag-p3      { background: #f1f5f9; color: #475569; }
+    .tag-xs      { background: #f0fdf4; color: #166534; }
+    .tag-s       { background: #f0fdf4; color: #166534; }
+    .tag-m       { background: #fff7ed; color: #9a3412; }
+    .tag-l       { background: #fef2f2; color: #991b1b; }
+    .tag-shipped { background: #dcfce7; color: #15803d; font-weight: 700; }
+    .tag-new     { background: #dbeafe; color: #1e40af; font-weight: 700; }
+    .tag-core    { background: #ede9fe; color: #5b21b6; }
+    .tag-dep     { background: #f1f5f9; color: #334155; font-style: italic; }
+    .tag-anchor  { background: #fef3c7; color: #78350f; font-weight: 700; }
+
+    /* PHASE BADGES */
+    .phase-badge { font-size: 10px; font-weight: 700; padding: 3px 8px; border-radius: 10px; white-space: nowrap; flex-shrink: 0; }
+    .phase-1    { background: #dcfce7; color: #15803d; border: 1px solid #bbf7d0; }
+    .phase-2    { background: #dbeafe; color: #1e40af; border: 1px solid #bfdbfe; }
+    .phase-3    { background: #ede9fe; color: #5b21b6; border: 1px solid #ddd6fe; }
+    .phase-4    { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
+    .phase-future { background: #f1f5f9; color: #475569; border: 1px solid #e2e8f0; }
+    .phase-inherited { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+
+    /* SOURCE LABELS */
+    .tag-paperclip { background: #e2e8f0; color: #334155; font-weight: 700; border: 1px solid #cbd5e1; }
+    .tag-praxio    { background: #e0f2fe; color: #0369a1; font-weight: 700; border: 1px solid #bae6fd; }
+
+    /* SOURCE RIBBON — top-right corner of card */
+    .card { position: relative; }
+    .source-ribbon { position: absolute; bottom: 10px; right: 10px; font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .ribbon-paperclip { background: #e2e8f0; color: #475569; border: 1px solid #cbd5e1; }
+    .ribbon-praxio    { background: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; }
+
+    /* FUTURE SECTION */
+    .unscheduled { background: #f8fafc; border: 1px solid var(--border); border-radius: 8px; padding: 14px 18px; margin-bottom: 24px; }
+    .unscheduled h3 { font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+    .unscheduled-items { display: flex; flex-wrap: wrap; gap: 8px; }
+    .unscheduled-item { background: white; border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; font-size: 12px; color: var(--text); }
+    .unscheduled-item .phase-badge { margin-left: 6px; }
+
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .summary { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 540px) { .summary { grid-template-columns: 1fr; } .legend { margin: 12px 20px 0; } .main { padding: 20px; } .header { padding: 20px; } }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Praxio — Features by Capability Group</h1>
+  <div class="sub">Conversation-first AI team management. What we've shipped, what's wiring up, and where we're headed.</div>
+</div>
+
+<div class="legend">
+  <div class="legend-item" style="font-size:11px;font-weight:700;color:#0369a1;margin-right:4px;">SOURCE —</div>
+  <div class="legend-item"><span class="source-ribbon ribbon-paperclip">📎 Paperclip</span> Carried over from Paperclip — live in prod today</div>
+  <div class="legend-item"><span class="source-ribbon ribbon-praxio">✦ Praxio</span> Built new for Praxio — did not exist in Paperclip</div>
+  <div class="legend-item" style="width:1px;background:#e2e8f0;margin:0 8px;height:16px;"></div>
+  <div class="legend-item" style="font-size:11px;font-weight:700;color:#475569;margin-right:4px;">PHASE —</div>
+  <div class="legend-item"><span class="phase-badge phase-1">Phase 1</span> Conversation UI — shipped</div>
+  <div class="legend-item"><span class="phase-badge phase-2">Phase 2</span> Backend Wiring — in progress</div>
+  <div class="legend-item"><span class="phase-badge phase-3">Phase 3</span> Agent Intelligence — planned</div>
+  <div class="legend-item"><span class="phase-badge phase-4">Phase 4</span> Scale &amp; Autonomy — next horizon</div>
+  <div class="legend-item"><span class="phase-badge phase-inherited">Inherited</span> From Paperclip — live in prod</div>
+  <div class="legend-item"><span class="phase-badge phase-future">Future</span> Not yet scheduled</div>
+</div>
+
+<div class="summary">
+  <div class="summary-stat">
+    <div class="num">8</div>
+    <div class="label">Capability groups</div>
+    <div class="detail">Conversation · Agents · Tasks · Real-Time · Quality · Budget · Platform · Future</div>
+  </div>
+  <div class="summary-stat">
+    <div class="num">4</div>
+    <div class="label">Active phases</div>
+    <div class="detail">Phase 1 shipped → Phase 2 wiring → Phase 3 intelligence → Phase 4 autonomy</div>
+  </div>
+  <div class="summary-stat">
+    <div class="num">30+</div>
+    <div class="label">Features shipped or in-flight</div>
+    <div class="detail">Phase 1 complete · Phase 2 backend wiring active</div>
+  </div>
+  <div class="summary-stat">
+    <div class="num">4</div>
+    <div class="label">Preconfigured agents</div>
+    <div class="detail">Rosalind (CoS) · Engineering · Marketing · Agent Ops</div>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 1: CONVERSATION INTERFACE -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-convo">
+    <div class="group-header">
+      <div class="group-icon">💬</div>
+      <div>
+        <h2>Conversation Interface</h2>
+        <div class="group-desc">The core Praxio paradigm — talk to your agent team instead of managing a task board</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Today — Daily Command Center</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Always-live view pinned to the top of the left nav. Rosalind is always present. You open Praxio and just talk — drop an update, capture a task, mark something done, ask a question, make a decision. No routing required on your end. Rosalind reads the stream, creates tasks, updates state files, dispatches to other agents, and responds when you need a response.
+          <br><br>Each calendar day is its own Today thread. At midnight it closes and becomes a permanent daily log entry. The next morning a fresh Today opens with Rosalind already loaded with yesterday's summary and the current state of all agents.
+          <br><br><strong>Entry types surfaced in UI:</strong> 💬 Update · ✅ Done · 📌 Task · ❓ Question · 🔀 Decision</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">★ Phase 2 anchor</span>
+          <span class="tag tag-new">New concept</span>
+          <span class="tag tag-anchor">CEO front door</span>
+        </div>
+      </div>
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Conversation Thread UI</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Full chat thread: message list, streaming message support, timestamped history, agent attribution per message. ConversationThread + Message components. Renders optimistically and handles real-time append from WebSocket.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+          <span class="tag tag-anchor">★ Phase anchor</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Message Input &amp; Send</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">MessageInput component — text entry, send on Enter, shift+Enter for newlines. Wired to conversation state hook. Disabled state during agent streaming.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Conversation Persistence (DB)</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Messages currently live in React state only — lost on refresh. Phase 2 wires conversations and conversation_messages tables (schema in migration 0086) to the backend. GET /conversations/:id hydrates history on load.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">P0</span>
+          <span class="tag tag-m">2–3 days</span>
+          <span class="tag tag-dep">schema exists, needs routes + services</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Conversation List &amp; History</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Left nav showing prior conversations with each agent — thread per session. Clicking resumes context. Needed before multi-session workflows make sense. Similar to how ChatGPT shows thread history in sidebar.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-m">2–3 days</span>
+          <span class="tag tag-dep">after conversation persistence</span>
+        </div>
+      </div>
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Board View — Governance Operating Layer</div>
+          <span class="phase-badge phase-3">Phase 3</span>
+        </div>
+        <div class="card-desc">A governance-level view above daily operations. Where the CEO view shows what's moving and what's blocked, the Board view shows what matters at the strategic level — rolled-up reports, key decisions on record, documents, budget summary, and agent workforce health.
+          <br><br>Think quarterly board packet, not daily ops. Built for a board member or investor who needs to understand state without seeing the operational detail. Requires live agents producing real output before it's meaningful.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1 for Phase 3</span>
+          <span class="tag tag-new">New view</span>
+          <span class="tag tag-dep">needs live agents + project docs</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Multi-Agent Thread Routing</div>
+          <span class="phase-badge phase-3">Phase 3</span>
+        </div>
+        <div class="card-desc">Route a single conversation to multiple agents — ask Rosalind a question, she loops in Engineering automatically. Thread shows which agent responded to which message. Uses the agent_presence table to know who's available.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-l">L — 1 week</span>
+          <span class="tag tag-new">New capability</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 2: AGENT TEAM -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-agents">
+    <div class="group-header">
+      <div class="group-icon">🤖</div>
+      <div>
+        <h2>Agent Team</h2>
+        <div class="group-desc">Your digital workforce — presence, selection, configuration, and onboarding</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Agent Sidebar — Selection &amp; Status</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Left panel listing all agents with current status (active, idle, busy). Click to switch active conversation partner. Shows agent role, budget remaining, and live presence indicator.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+          <span class="tag tag-core">4 agents preconfigured</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Presence Indicators</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">PresenceIndicator component — color-coded dot showing agent status. Backed by agent_presence table. Currently populated by WebSocket heartbeat. Green = active, amber = idle, grey = offline.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Rosalind — Chief of Staff Agent</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Rosalind is pre-wired as the primary CoS agent: cross-team coordination, peer agent state reads, daily summaries, meeting prep. SKILL.md, state/, and workflows/ scaffolded. Dispatches to other agents on request.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Scaffolded</span>
+          <span class="tag tag-anchor">★ Team anchor</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Engineering, Marketing &amp; Agent Ops</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Three specialist agents preconfigured: Engineering (code, infra, QA), Marketing (SEO, copy, campaigns), Agent Ops (hiring, grading, workforce health). Each has SKILL.md and base config. Full activation in Phase 2.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Scaffolded</span>
+          <span class="tag tag-dep">→ full wiring Phase 2</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Live Agent Integration (Real Execution)</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Currently agents are mocked in the sidebar. Phase 2 connects the conversation UI to real agent execution via the Claude Code adapter. Message → WebSocket → agent runner → streamed response back. The actual intelligence loop.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">P0 for Phase 2</span>
+          <span class="tag tag-l">L — 1 week</span>
+          <span class="tag tag-dep">depends on conversation persistence</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Agent Hiring Flow (Praxio UX)</div>
+          <span class="phase-badge phase-3">Phase 3</span>
+        </div>
+        <div class="card-desc">Conversation-native agent hiring — describe the role in chat, Praxio scaffolds the SKILL.md, state/, and workflows/. Surfaces the agent-ops /hire skill via a guided conversational onboarding flow. No YAML editing required.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-m">M — 3–4 days</span>
+          <span class="tag tag-new">New capability</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 3: TASK & WORKFLOW ENGINE -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-tasks">
+    <div class="group-header">
+      <div class="group-icon">✅</div>
+      <div>
+        <h2>Task &amp; Workflow Engine</h2>
+        <div class="group-desc">Full task management backbone — all inherited from Paperclip and live in production</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Issue &amp; Task Board</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Full issue tracking: create, assign, prioritize, block, comment, attach files. Issues back agent work — agents check out tasks, post progress, and surface blockers. 38 API routes, 112 services.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+          <span class="tag tag-core">Core platform</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Approval Workflows</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Gate agent actions on human review. Approval cards, review flows, accept/reject/request-changes. Agents pause until approval clears. Configurable per-agent and per-action type.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+          <span class="tag tag-core">Core governance</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Routines — Scheduled Tasks</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Cron-scheduled recurring agent tasks. Morning standup summaries, weekly reviews, automated data pulls. Managed via the Routines page or Paperclip skill CLI commands.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Goals Hierarchy</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">OKR-style goal tree — company → team → agent level. Issues roll up to goals. Agents see which goal their current task serves. Alignment visible in org chart view.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Projects → Agent Assignment</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">A project without an agent is just a folder — no one is driving it. When you create a project, you assign an existing agent or the system prompts you to hire one if nothing fits. The assigned agent owns the project's work queue, updates its state, and surfaces blockers. Connects directly to the agent-ops <code>/hire</code> skill.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-m">M — 2–3 days</span>
+          <span class="tag tag-new">New concept</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Project Documents + Desktop Sync</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Projects generate artifacts — specs, briefs, reports, decisions. Each project maps to a folder at a known local path (<code>~/Documents/Praxio/projects/{slug}/</code>) so files are accessible from Finder, VS Code, or any other tool. Praxio watches the folder for changes and syncs back. Documents are referenceable inside and outside Praxio with no manual export step.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-m">M — 3–4 days</span>
+          <span class="tag tag-new">New capability</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Conversation → Task Creation</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Turn a conversation thread into a tracked issue automatically. "Create a task for this" in chat creates an issue linked to the conversation. Closes the loop between chat intent and structured work tracking.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-s">S — 1–2 days</span>
+          <span class="tag tag-new">New bridge</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">WAT Playbook Execution</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Workflows (SOPs) in workflows/ are currently static markdown. Phase 2 makes them executable — agents load the relevant workflow at task start, follow steps sequentially, and surface step completion in the conversation thread.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">P0 for Phase 2</span>
+          <span class="tag tag-l">L — 1 week</span>
+          <span class="tag tag-anchor">★ WAT framework core</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 4: REAL-TIME & LIVE DATA -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-realtime">
+    <div class="group-header">
+      <div class="group-icon">⚡</div>
+      <div>
+        <h2>Real-Time &amp; Live Data</h2>
+        <div class="group-desc">WebSocket infrastructure — streaming responses, presence, budget updates, live events</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">WebSocket Server</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">live-events-ws.ts — native WebSocket server wired into the Express app. Handles connection management, broadcast rooms (per-org, per-agent), and the event dispatch loop. Echo stub confirms the plumbing works end-to-end.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+          <span class="tag tag-core">Infrastructure</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">useWebSocket Hook</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">React hook that manages the WebSocket connection lifecycle — connect, reconnect with backoff, message dispatch, cleanup on unmount. Consumed by Conversations page and ConversationThread.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Streaming Agent Responses</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Tokens stream from agent execution → WebSocket → append to message in real time. ConversationThread already renders append-style — just needs the server-side pump connected to the real Claude adapter output stream.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">P0 for Phase 2</span>
+          <span class="tag tag-m">M — 2–3 days</span>
+          <span class="tag tag-dep">depends on live agent integration</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Live Presence Broadcast</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Heartbeat from agent runners updates agent_presence table. WS broadcasts status changes to all connected clients. Presence indicators update without page reload — see when an agent goes active mid-conversation.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-s">S — 1 day</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Live Budget Updates</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">BudgetStrip component is wired to receive WS budget events. Agent execution deducts tokens in real time — BudgetStrip animates the draw-down as the agent works. Hard-stop event triggers warning UI before the budget hits zero.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-s">S — 1 day</span>
+          <span class="tag tag-dep">depends on streaming responses</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 5: QUALITY & INTELLIGENCE -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-quality">
+    <div class="group-header">
+      <div class="group-icon">📊</div>
+      <div>
+        <h2>Quality &amp; Intelligence</h2>
+        <div class="group-desc">Grading, feedback loops, playbooks — the system that makes agents improve over time</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Session Grading Panel</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">SessionGrading component in the right panel. Four grades: Accepted · Minor Edits · Major Rework · Scrapped. UI submits to POST /grades. Grade persisted in session_grades table. The feedback signal that drives agent improvement.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">UI shipped</span>
+          <span class="tag tag-anchor">★ Quality anchor</span>
+          <span class="tag tag-dep">→ full DB integration Phase 2</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">WAT Playbook Panel</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">PlaybookPanel component displays the active workflow for the current task — the SOP the agent is following. Shows step list, current step highlight, and completion state. Currently renders static content; Phase 2 wires to live workflow execution.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">UI shipped</span>
+          <span class="tag tag-dep">→ live wiring Phase 2</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Grade → Agent Feedback Loop</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Session grades feed back to the agent as structured context in the next session. "Major Rework" grades trigger an agent-ops review surfaced in the weekly workforce health report. Grades stored in session_grades become the training signal for agent improvement.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">P0 for Phase 2</span>
+          <span class="tag tag-m">M — 2–3 days</span>
+          <span class="tag tag-dep">depends on grade persistence</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Agent Ops Weekly Review</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Scheduled routine: every Monday, Agent Ops reviews grade history across all agents. Surfaces failure themes ("3 major reworks on copywriting tasks"), recommends Hire/Retire/Update decisions. Report surfaces in the Conversations page as a weekly briefing.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-m">M — 2–3 days</span>
+          <span class="tag tag-dep">depends on grade feedback loop</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Automated Evals Framework</div>
+          <span class="phase-badge phase-3">Phase 3</span>
+        </div>
+        <div class="card-desc">promptfoo evals infrastructure already scaffolded in /evals/. Phase 3 wires agent outputs to automated eval suites — grade quality, instruction following, tool use accuracy. Evals run on every agent config change. Catches regressions before they reach production sessions.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-l">L — 1 week</span>
+          <span class="tag tag-core">evals/ scaffolded</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 6: BUDGET & COST CONTROL -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-budget">
+    <div class="group-header">
+      <div class="group-icon">💰</div>
+      <div>
+        <h2>Budget &amp; Cost Control</h2>
+        <div class="group-desc">Token budgets, spend limits, cost tracking — keep agent autonomy financially bounded</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Budget Strip UI</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">BudgetStrip component in the right panel — shows token budget remaining for current agent session. Visual bar with remaining %, hard-stop threshold indicator. Updates via WebSocket in Phase 2.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">UI shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Budget Policies &amp; Hard Stops</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Budget enforcement engine from Paperclip — per-agent token budgets, per-session caps, hard stops that pause agent execution before cost overrun. Budget policies configurable per role.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+          <span class="tag tag-core">Core governance</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Cost Tracking &amp; Spend Reports</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Full cost ledger — per-agent, per-task, per-day token costs. Costs page shows spend breakdown with drill-down. Exportable. Enables per-client billing if needed.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Conversation Budget Scoping</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Scope a budget to a specific conversation thread — "this thread gets $5 of tokens." Budget resets per new conversation. Prevents runaway costs on exploratory chat while allowing deep work on high-priority threads.</div>
+        <div class="card-footer">
+          <span class="tag tag-p2">P2</span>
+          <span class="tag tag-s">S — 1–2 days</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- GROUP 7: PLATFORM FOUNDATION -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-platform">
+    <div class="group-header">
+      <div class="group-icon">🏗️</div>
+      <div>
+        <h2>Platform Foundation</h2>
+        <div class="group-desc">Auth, database schema, theming, adapters, plugin system — the substrate everything runs on</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Praxio DB Schema (Migration 0086)</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Four new tables: conversations, conversation_messages, session_grades, agent_presence. Drizzle ORM schema with FK relationships to agents and companies. Migration runs clean on fresh install.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Dark / Light Theme Toggle</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">ThemeContext with localStorage persistence. ThemeToggle component in the UI. Theme key consolidated to praxio-theme. CSS variables swap on toggle — full dark mode across the Praxio shell.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Auth &amp; Multi-User (BetterAuth)</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">BetterAuth integration — session management, multiple human users, role-based access control. Board-level authorization middleware. Supports local_trusted dev mode (no auth) and full authenticated prod mode.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+          <span class="tag tag-core">Core auth</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Claude Code Adapter</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Claude Code adapter in packages/adapters/ — bridges agent configs to Claude Code CLI execution. Handles worktree spawning, output streaming, heartbeat management. The execution engine behind every agent session.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+          <span class="tag tag-core">Execution engine</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-paperclip">📎 Paperclip</span>
+        <div class="card-header">
+          <div class="card-title">Plugin System</div>
+          <span class="phase-badge phase-inherited">Inherited ✓</span>
+        </div>
+        <div class="card-desc">Out-of-process plugin workers with UI bridge. Plugins register capabilities, tools, and UI panels. Plugin lifecycle managed by the server. Enables Praxio extensions without touching core.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Live</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">E2E Test Coverage (Playwright)</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Playwright e2e tests for Praxio conversation thread and right panel. Tests cover: thread renders messages, grading panel interactions, WebSocket connection. Foundation for Phase 2 regression suite.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+          <span class="tag tag-dep">→ expand with Phase 2 features</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Praxio Branding &amp; Rebrand</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Product renamed from Paperclip → Praxio. NOTICES file updated, product name constant updated across server and UI. WAT framework (Workflows, Agents, Tools) replaces Paperclip's WATC framework terminology in agent-facing docs.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- FUTURE / PHASE 4 -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="group group-future">
+    <div class="group-header">
+      <div class="group-icon">🚀</div>
+      <div>
+        <h2>Phase 4 &amp; Future Capabilities</h2>
+        <div class="group-desc">Higher autonomy, memory, artifacts — the path from managed agents to self-organizing teams</div>
+      </div>
+    </div>
+    <div class="grid">
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">CEO Daily Ops Mode</div>
+          <span class="phase-badge phase-4">Phase 4</span>
+        </div>
+        <div class="card-desc">You open Praxio, say "run," and the agents move. No constant prompting. Agents pick up the work queue in priority order, execute, surface results in Today, and flag decisions that need you. Rosalind coordinates sequencing — she knows who's free, what's blocked, and what needs a human call.
+          <br><br>This is the self-driving organization. Today gives you the stream. Daily Ops Mode means the stream keeps moving even when you're heads-down on something else. Built on top of: memory ✓, Today view, live agents, work queues.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">★ Phase 4 anchor</span>
+          <span class="tag tag-new">New paradigm</span>
+          <span class="tag tag-dep">needs Today + live agents + work queues</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Praxio Logo &amp; Visual Identity</div>
+          <span class="phase-badge phase-2">Phase 2</span>
+        </div>
+        <div class="card-desc">Praxio needs its own mark. "Praxio" comes from <em>praxis</em> — practice, action, execution. The logo should suggest forward motion and conversation, not management overhead. SVG-first so it works at any size in the UI. Needed before any external positioning begins.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1</span>
+          <span class="tag tag-xs">Quick — design sprint</span>
+          <span class="tag tag-new">Identity</span>
+        </div>
+      </div>
+
+      <div class="card star">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">MAXIMIZER MODE — Higher Autonomy Execution</div>
+          <span class="phase-badge phase-4">Phase 4</span>
+        </div>
+        <div class="card-desc">Agents run longer chains without approval gates. MAXIMIZER MODE is an opt-in execution policy that loosens checkpoints for trusted, well-graded agents. Grading history is the safety mechanism — you earn MAXIMIZER by demonstrating consistent quality.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">★ Phase 4 anchor</span>
+          <span class="tag tag-new">New capability</span>
+          <span class="tag tag-dep">depends on grade history</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Memory &amp; Knowledge Layer</div>
+          <span class="phase-badge phase-1">Phase 1 ✓</span>
+        </div>
+        <div class="card-desc">Persistent agent memory across sessions — decisions, commitments, learned preferences. Each direct report has <code>state/current.md</code> (rolling snapshot) and <code>state/last-session.md</code> (handoff notes). CEO context file holds strategic priorities. Rosalind reads all state files at session start. Sub-agents write to their manager's state, not their own.</div>
+        <div class="card-footer">
+          <span class="tag tag-shipped">Shipped</span>
+          <span class="tag tag-anchor">Context substrate</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Artifacts &amp; Work Products</div>
+          <span class="phase-badge phase-4">Phase 4</span>
+        </div>
+        <div class="card-desc">Agents produce structured outputs — docs, reports, code — surfaced as linked artifacts in the conversation thread. Artifact browser in the right panel. Version history. Artifacts are the deliverables that make agent work auditable.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1 for Phase 4</span>
+          <span class="tag tag-new">New capability</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">CEO Chat — Executive Interface</div>
+          <span class="phase-badge phase-4">Phase 4</span>
+        </div>
+        <div class="card-desc">A dedicated conversation surface where the CEO talks to the whole org — Rosalind routes directives to the right agents, surfaces a consolidated daily briefing, and owns the weekly review. Single thread replaces all agent management overhead.</div>
+        <div class="card-footer">
+          <span class="tag tag-p0">★ UX north star</span>
+          <span class="tag tag-new">New capability</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Self-Organization &amp; Work Queues</div>
+          <span class="phase-badge phase-future">Future</span>
+        </div>
+        <div class="card-desc">Agents claim work from a shared queue without human dispatch. Rosalind prioritizes the queue based on goals and urgency. Agents signal capacity, pull next item, execute. Human oversight is supervisory, not operational.</div>
+        <div class="card-footer">
+          <span class="tag tag-p1">P1 for Future</span>
+          <span class="tag tag-new">New paradigm</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <span class="source-ribbon ribbon-praxio">✦ Praxio</span>
+        <div class="card-header">
+          <div class="card-title">Automatic Organizational Learning</div>
+          <span class="phase-badge phase-future">Future</span>
+        </div>
+        <div class="card-desc">After a major incident or win, Praxio runs a retrospective: what went wrong/right, which workflow failed, what to change. Workflow files get updated automatically, approved by CoS before commit. The system gets smarter every week.</div>
+        <div class="card-footer">
+          <span class="tag tag-p2">P2</span>
+          <span class="tag tag-new">Emerging capability</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════ -->
+  <!-- FUTURE / UNSCHEDULED -->
+  <!-- ══════════════════════════════════════ -->
+  <div class="unscheduled">
+    <h3>Future / Unscheduled — Not Yet Phased</h3>
+    <div class="unscheduled-items">
+      <div class="unscheduled-item">Deep Planning — multi-step plan generation before execution <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Cloud / Sandbox Agent Execution (e2b, Cursor) <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Desktop App (Mac / Windows native shell) <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Cloud Deployment — hosted Praxio instance <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">SSO / SAML for enterprise teams <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Enforced Outcomes — agent work tied to measurable goal metrics <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Multi-company workspace switching from conversation bar <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Jira / Linear integration — sync issues bidirectionally <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Slack notification channel for agent events <span class="phase-badge phase-future">Future</span></div>
+      <div class="unscheduled-item">Customer-facing agent status page <span class="phase-badge phase-future">Future</span></div>
+    </div>
+  </div>
+
+</div>
+
+<div style="border-top:1px solid var(--border); padding:20px 40px; color:var(--muted); font-size:12px;">
+  Last updated 2026-05-18 · Branch: <code style="background:#f1f5f9; padding:1px 5px; border-radius:4px; font-size:11px;">feat/praxio-ui</code> · Phase 1 complete · Phase 2 backend wiring in progress
+</div>
+
+</body>
+</html>

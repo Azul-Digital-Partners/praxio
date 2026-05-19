@@ -10,7 +10,7 @@ export function ThemeToggle({ isDark, onToggle }: ThemeToggleProps) {
     <button
       onClick={onToggle}
       title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
-      className="text-white/70 hover:text-white transition-colors"
+      className="text-muted-foreground hover:text-foreground transition-colors"
     >
       {isDark ? <Sun size={16} /> : <Moon size={16} />}
     </button>

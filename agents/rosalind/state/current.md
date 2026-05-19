@@ -5,16 +5,15 @@ Last updated: 2026-05-18
 Chief of Staff. Primary coordinator across the agent team. Reads all agent state files at session start.
 
 ## Active Work
-- Praxio Phase 1 complete — conversation UI shell shipped, Phase 2 backend wiring not yet started
-- Two worktree branches ready to merge: `feat/today-view` and `feat/visible-rebrand`
-- Release Manager agent scaffolded and wired into team structure
+- Praxio Phase 1 fully shipped (PR #1 merged to master)
+- Phase 2 not yet started — Engineering on standby
+- Two worktrees (feat-today-view, feat-visible-rebrand) built but not merged — fate TBD
 
 ## Open Items
-- [ ] Merge `feat/today-view` into `feat/praxio-ui` (Today view + Approvals NavRail + message tags + migration 0087)
-- [ ] Merge `feat/visible-rebrand` into `feat/praxio-ui` (30-file visible Paperclip→Praxio rebrand)
-- [ ] Engineering to begin Phase 2: conversation persistence → live agent integration → streaming
-- [ ] Agent Ops to activate full agent review cycle once grading is live
-- [ ] Marketing has no active campaigns for Praxio yet — no ask pending
+- [ ] Decide fate of feat-today-view and feat-visible-rebrand worktrees (merge to master or abandon)
+- [ ] Engineering to begin Phase 2: conversation persistence → live streaming → grading feedback loop
+- [ ] Agent Ops to activate review cycle once Phase 2 grading is live
+- [ ] Marketing has no active campaigns for Praxio — no ask pending
 
 ## Key Context
 - Rosalind's full skill library lives in the CoS repo, not in agents/rosalind/skills/
@@ -27,10 +26,12 @@ Chief of Staff. Primary coordinator across the agent team. Reads all agent state
 - Rebranding: visible-only now; package names + env vars deferred to external launch
 - Release Manager added to team; reports to Engineering; Rosalind reads its state at session start
 - Engineering work must route through Engineering + Release Manager agents, not executed directly
+- /conversations page removed — Issues + Agent assignment is the primary human→agent workflow
+- Strategic intent: Praxio is the operating environment for the agent team going forward — development work happens inside the app, not via external Claude Code sessions
 
 ## Flags / Blockers
 - None active
 
 ## People Context
 - Steven Christopher — CEO, Azul Digital. Works from conversation; prefers concise updates, no summaries of obvious things.
-- Email: Outlook (work/primary), iCloud (personal). Do NOT assume Gmail. Updated 2026-05-18.
+- Email: Outlook (work/primary), iCloud (personal). Do NOT assume Gmail.

@@ -28,8 +28,12 @@ import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Button } from "@/components/ui/button";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
+import { ThemeToggle } from "./praxio/ThemeToggle";
+import { useTheme } from "@/context/ThemeContext";
 
 export function Sidebar() {
+  const { theme, toggleTheme } = useTheme();
+  const isDark = theme === "dark";
   const { openNewIssue } = useDialogActions();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const inboxBadge = useInboxBadge(selectedCompanyId);
@@ -68,6 +72,7 @@ export function Sidebar() {
             <Search className="h-4 w-4" />
           </NavLink>
         </Button>
+        <ThemeToggle isDark={isDark} onToggle={toggleTheme} />
       </div>
 
       <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 px-3 py-2">

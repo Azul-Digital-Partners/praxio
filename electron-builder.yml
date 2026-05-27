@@ -1,0 +1,75 @@
+appId: com.azuldigital.praxio
+productName: Praxio
+copyright: Copyright (c) 2026 Azul Digital LLC
+
+# Run electron-builder from the repo root; the Electron app code lives in ./electron.
+directories:
+  app: electron
+  output: dist-electron
+  buildResources: electron/build
+
+# Files included in the packaged app from inside `electron/`.
+# We ship the bundled main.mjs plus its sourcemap. node_modules in `electron/`
+# (electron itself + workspace links) are handled by `nodeGypRebuild` + `npmRebuild`.
+files:
+  - "package.json"
+  - "dist/**/*"
+
+# Files copied from the repo root into the app's resources (read-only).
+# Praxio's server needs the on-disk migrations + UI assets at runtime.
+extraResources:
+  - from: "server/dist"
+    to: "app/server/dist"
+    filter: ["**/*"]
+  - from: "server/ui-dist"
+    to: "app/server/ui-dist"
+    filter: ["**/*"]
+    optional: true
+  - from: "packages/db/drizzle"
+    to: "app/packages/db/drizzle"
+    filter: ["**/*"]
+    optional: true
+
+# Ensure server + workspace deps are installed in the packaged app.
+npmRebuild: true
+nodeGypRebuild: false
+
+# Use asar so the app loads quickly, but unpack native modules so they can dlopen.
+asar: true
+asarUnpack:
+  - "node_modules/embedded-postgres/**/*"
+  - "node_modules/better-sqlite3/**/*"
+  - "**/*.node"
+
+mac:
+  category: public.app-category.developer-tools
+  artifactName: "Praxio-${version}-${arch}.${ext}"
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  # Hardened runtime is required for notarization.
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: electron/build/entitlements.mac.plist
+  entitlementsInherit: electron/build/entitlements.mac.inherit.plist
+  # Identity is picked up automatically from the keychain by partial-name match.
+  # Set CSC_IDENTITY_AUTO_DISCOVERY=true (default) and the cert must be installed.
+  identity: "Developer ID Application: Azul Digital LLC (LG82A2ZSA4)"
+  notarize: false  # Notarization runs via the afterSign hook below.
+
+dmg:
+  artifactName: "Praxio-${version}-${arch}.dmg"
+  sign: false
+  # Standard "drag to Applications" layout.
+  contents:
+    - x: 130
+      y: 220
+      type: file
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+
+afterSign: scripts/electron-notarize.mjs

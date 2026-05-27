@@ -1,0 +1,31 @@
+{
+  "name": "@paperclipai/electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Praxio desktop shell (Electron) — boots the Praxio server and renders the UI in a native window.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/main.mjs",
+  "scripts": {
+    "build": "node build.mjs",
+    "build:watch": "node build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "electron dist/main.mjs",
+    "dev": "pnpm run build && electron dist/main.mjs",
+    "dist": "pnpm run build && cd .. && electron-builder --config electron-builder.yml",
+    "dist:mac": "pnpm run build && cd .. && electron-builder --config electron-builder.yml --mac",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@paperclipai/server": "workspace:*",
+    "detect-port": "^1.6.1"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^2.5.0",
+    "@types/node": "^22.10.0",
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.27.3",
+    "typescript": "^5.7.3"
+  }
+}

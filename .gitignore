@@ -61,3 +61,7 @@ playwright-report/
 .superpowers/
 .claude/worktrees/
 .worktrees/
+
+# electron-builder output
+dist-electron/
+electron/dist/

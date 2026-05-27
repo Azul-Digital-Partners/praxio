@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Required for Electron's V8 JIT compiler under the hardened runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <!-- Allow unsigned memory (Chromium/V8 also requires this). -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <!-- Allow dyld environment variables — required by Chromium components. -->
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+  <true/>
+  <!-- Required for outbound network (Praxio talks to LLM providers + local API). -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <!-- Embedded server listens on localhost; needed for the BrowserWindow to load it. -->
+  <key>com.apple.security.network.server</key>
+  <true/>
+  <!-- User-scoped file access (Praxio stores config and projects under userData). -->
+  <key>com.apple.security.files.user-selected.read-write</key>
+  <true/>
+  <!-- Required by some helper bundles to inherit entitlements. -->
+  <key>com.apple.security.inherit</key>
+  <false/>
+</dict>
+</plist>

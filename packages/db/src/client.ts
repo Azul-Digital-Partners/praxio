@@ -2,13 +2,24 @@ import { createHash } from "node:crypto";
 import { drizzle as drizzlePg } from "drizzle-orm/postgres-js";
 import { migrate as migratePg } from "drizzle-orm/postgres-js/migrator";
 import { readFile, readdir } from "node:fs/promises";
+import { join as joinPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import * as schema from "./schema/index.js";
 
-const MIGRATIONS_FOLDER = fileURLToPath(new URL("./migrations", import.meta.url));
+// Allow the host application (e.g. a packaged Electron build) to redirect
+// migrations to a copy that lives outside the JS bundle. When unset we fall
+// back to the original `./migrations` directory next to this module, which is
+// what `pnpm dev` and the standalone `tsx` runner expect.
+function resolveMigrationsFolder(): string {
+  const override = process.env.PAPERCLIP_DB_MIGRATIONS_DIR;
+  if (override && override.length > 0) return override;
+  return fileURLToPath(new URL("./migrations", import.meta.url));
+}
+
+const MIGRATIONS_FOLDER = resolveMigrationsFolder();
 const DRIZZLE_MIGRATIONS_TABLE = "__drizzle_migrations";
-const MIGRATIONS_JOURNAL_JSON = fileURLToPath(new URL("./migrations/meta/_journal.json", import.meta.url));
+const MIGRATIONS_JOURNAL_JSON = joinPath(MIGRATIONS_FOLDER, "meta", "_journal.json");
 
 function createUtilitySql(url: string) {
   return postgres(url, { max: 1, onnotice: () => {} });
@@ -107,7 +118,7 @@ async function listJournalMigrationFiles(): Promise<string[]> {
 }
 
 async function readMigrationFileContent(migrationFile: string): Promise<string> {
-  return readFile(new URL(`./migrations/${migrationFile}`, import.meta.url), "utf8");
+  return readFile(joinPath(MIGRATIONS_FOLDER, migrationFile), "utf8");
 }
 
 async function orderMigrationsByJournal(migrationFiles: string[]): Promise<string[]> {

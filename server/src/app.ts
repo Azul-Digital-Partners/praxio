@@ -307,8 +307,11 @@ export async function createApp(
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   if (opts.uiMode === "static") {
-    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
+    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist).
+    // Packaged Electron builds prepend `PAPERCLIP_UI_DIST` so the bundled server can find the
+    // UI under `process.resourcesPath/app/server/ui-dist` instead of next to the JS bundle.
     const candidates = [
+      ...(process.env.PAPERCLIP_UI_DIST ? [process.env.PAPERCLIP_UI_DIST] : []),
       path.resolve(__dirname, "../ui-dist"),
       path.resolve(__dirname, "../../ui/dist"),
     ];

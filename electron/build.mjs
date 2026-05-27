@@ -1,15 +1,27 @@
 #!/usr/bin/env node
 /**
- * Bundle the Electron main process with esbuild.
+ * Bundle the Electron app for shipping.
  *
- * Output is ESM (.mjs) because @paperclipai/server uses `import.meta.url`
- * throughout, which is invalid in a CommonJS bundle. Electron supports ESM
- * main processes natively from v28+.
+ * Two outputs:
+ *   dist/main.mjs          — Electron main process. Imports `electron`
+ *                            (kept external) and forks the server bundle.
+ *   dist/server.bundle.mjs — Utility-process entry. Inlines the entire
+ *                            `@paperclipai/server` graph and its workspace
+ *                            dependencies so the packaged app does not rely
+ *                            on pnpm workspace symlinks inside app.asar.
  *
- * Heavy/native modules (electron itself, embedded-postgres, the rest of the
- * server's runtime deps) are kept external — they are resolved at runtime
- * from node_modules. electron-builder will pack node_modules into the
- * app's `app.asar.unpacked` (for native modules) or `app.asar`.
+ * Both outputs are ESM (.mjs) because the server uses `import.meta.url`
+ * and dynamic `import()` extensively; CommonJS bundles cannot host that.
+ *
+ * Externals strategy for `server.bundle.mjs`:
+ *   - `electron` — only the parent process resolves this; in the utility
+ *     process it would crash. Keep external so any stray import fails fast.
+ *   - True native modules — `embedded-postgres`, `sharp`, `better-sqlite3`,
+ *     and their platform sub-packages (`@embedded-postgres/*`, `@img/*`).
+ *     These ship a `.node` binding or a per-arch binary and must be loaded
+ *     from the unpacked `node_modules` tree, not inlined into a JS bundle.
+ *   - Everything else (express, drizzle, ws, pino, ajv, jsdom, etc., and
+ *     all workspace `@paperclipai/*` packages) is inlined.
  */
 import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
@@ -23,20 +35,27 @@ const pkg = JSON.parse(
   readFileSync(resolve(__dirname, "package.json"), "utf8"),
 );
 
-const external = [
-  "electron",
-  // Server deps that have native bindings or load assets at runtime.
-  "embedded-postgres",
-  "better-sqlite3",
-  "@aws-sdk/client-s3",
-  // Anything in our own scope can also stay external — pnpm will install it
-  // into the packaged node_modules.
-  /^@paperclipai\//.source,
-];
-
 const watch = process.argv.includes("--watch");
 
-const config = {
+// CJS-style globals expected by some transitive deps when loaded inside an
+// ESM bundle (e.g. pino, jsdom). Provided as banners so they are present in
+// the very first lines of every bundle.
+const cjsShimBanner = [
+  `import { createRequire as __pcCreateRequire } from "node:module";`,
+  `import { fileURLToPath as __pcFileURLToPath } from "node:url";`,
+  `import { dirname as __pcDirname } from "node:path";`,
+  `const require = __pcCreateRequire(import.meta.url);`,
+  `const __filename = __pcFileURLToPath(import.meta.url);`,
+  `const __dirname = __pcDirname(__filename);`,
+].join("\n");
+
+// ---------------------------------------------------------------------------
+// main.mjs — Electron main process. Stays thin: it only needs `electron`
+// plus a small set of helpers. Workspace deps are NOT referenced here
+// directly anymore (the server runs in a utility process), so we only need
+// the standard set of externals.
+// ---------------------------------------------------------------------------
+const mainConfig = {
   entryPoints: [resolve(__dirname, "src/main.ts")],
   outfile: resolve(__dirname, "dist/main.mjs"),
   bundle: true,
@@ -44,50 +63,151 @@ const config = {
   format: "esm",
   target: "node20",
   sourcemap: true,
-  // Mark every workspace + native module external; we ship them in node_modules.
-  external: [
-    "electron",
-    "@paperclipai/server",
-    "@paperclipai/db",
-    "@paperclipai/adapter-acpx-local",
-    "@paperclipai/adapter-claude-local",
-    "@paperclipai/adapter-codex-local",
-    "@paperclipai/adapter-cursor-cloud",
-    "@paperclipai/plugin-sdk",
-    "embedded-postgres",
-    "better-sqlite3",
-    "@aws-sdk/client-s3",
-    "detect-port",
-    // Common server runtime deps — keep external to avoid pulling them through
-    // the bundler. The packaged app's node_modules will have them.
-    "express",
-    "drizzle-orm",
-    "pino",
-    "ws",
-  ],
-  banner: {
-    // Provide CJS-style globals that some transitive deps still expect when
-    // loaded via dynamic import inside an ESM bundle.
-    js: [
-      `import { createRequire as __pcCreateRequire } from "node:module";`,
-      `import { fileURLToPath as __pcFileURLToPath } from "node:url";`,
-      `import { dirname as __pcDirname } from "node:path";`,
-      `const require = __pcCreateRequire(import.meta.url);`,
-      `const __filename = __pcFileURLToPath(import.meta.url);`,
-      `const __dirname = __pcDirname(__filename);`,
-    ].join("\n"),
-  },
+  external: ["electron"],
+  // No CJS shim banner here: main.ts is small, only imports `electron` and
+  // node:* builtins, and declares its own `__filename`/`__dirname` from
+  // `import.meta.url`. Injecting the banner would cause a duplicate
+  // identifier error.
   logLevel: "info",
   metafile: true,
 };
 
+// ---------------------------------------------------------------------------
+// server.bundle.mjs — utility-process entry. Inlines the server graph and
+// every workspace dep. Only true native modules and `electron` are external.
+// ---------------------------------------------------------------------------
+const serverExternal = [
+  "electron",
+  // Embedded Postgres ships per-arch native binaries via optional deps that
+  // are loaded by `require()` at runtime. Keep the parent and every known
+  // platform sub-package external so the unpacked binaries are reachable.
+  "embedded-postgres",
+  "@embedded-postgres/darwin-arm64",
+  "@embedded-postgres/darwin-x64",
+  "@embedded-postgres/linux-arm64",
+  "@embedded-postgres/linux-x64",
+  "@embedded-postgres/win32-x64",
+  // sharp has a Node-API binding and platform-specific libvips packages.
+  "sharp",
+  "@img/sharp-darwin-arm64",
+  "@img/sharp-darwin-x64",
+  "@img/sharp-linux-arm64",
+  "@img/sharp-linux-x64",
+  "@img/sharp-win32-x64",
+  "@img/sharp-libvips-darwin-arm64",
+  "@img/sharp-libvips-darwin-x64",
+  "@img/sharp-libvips-linux-arm64",
+  "@img/sharp-libvips-linux-x64",
+  // better-sqlite3 — present in the dep graph but not currently `import`-ed
+  // from server code. Kept external defensively in case a transitive dep
+  // loads it (e.g. better-auth adapters).
+  "better-sqlite3",
+  // Third-party SDKs that ship a single webpack-bundled JS entry alongside
+  // .d.ts files referencing internal workspace packages. esbuild follows the
+  // .d.ts side of the `exports` map and fails because those workspace deps
+  // are not published. Keep them external and install them into
+  // electron/node_modules so the runtime import works.
+  "@cursor/sdk",
+  "@anthropic-ai/claude-agent-sdk",
+  "hermes-paperclip-adapter",
+  // Optional native filesystem watcher used by chokidar on macOS. ships a
+  // `.node` binding. Keep external + unpack at install time.
+  "fsevents",
+  // CSS toolchain native binding (used transitively by some UI tooling).
+  "lightningcss",
+  // jsdom and its CSS tree dependency load JSON data files via
+  // `createRequire(import.meta.url)("../data/...json")`. After bundling, the
+  // bundle's location is electron/dist/ so those relative paths point at the
+  // wrong place. Externalize the tree and install jsdom at runtime so the
+  // sibling node_modules/jsdom/... data files resolve correctly.
+  "jsdom",
+  "css-tree",
+  "mdn-data",
+  // pino + transports use worker_threads with a worker filename computed from
+  // `__dirname` inside pino. When pino is bundled, that worker path resolves
+  // to electron/dist/worker.js (does not exist) instead of pino/lib/worker.js.
+  // Externalize the whole pino logging surface so workers boot off the real
+  // filesystem at electron/node_modules/pino/...
+  "pino",
+  "pino-http",
+  "pino-pretty",
+  "pino-abstract-transport",
+  "pino-std-serializers",
+  "thread-stream",
+  "real-require",
+  // ws is required via createRequire(import.meta.url) from
+  // server/realtime/live-events-ws.ts; bundling would mask the failure.
+  "ws",
+];
+
+const serverConfig = {
+  entryPoints: [resolve(__dirname, "src/server-entry.ts")],
+  outfile: resolve(__dirname, "dist/server.bundle.mjs"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node20",
+  sourcemap: true,
+  external: serverExternal,
+  // Pin esbuild to resolve via the runtime conditions only. Without this,
+  // esbuild picks up `types` exports from third-party SDKs (e.g. @cursor/sdk)
+  // and tries to bundle `.d.ts` files, which fails.
+  conditions: ["node", "import", "default"],
+  mainFields: ["module", "main"],
+  resolveExtensions: [".ts", ".mjs", ".js", ".cjs"],
+  banner: { js: cjsShimBanner },
+  // Some deps lazy-`require()` optional native modules (e.g. pino transports,
+  // jsdom canvas). Mark those as external too so bundling does not fail when
+  // they're missing — they'll be resolved at runtime if installed.
+  plugins: [
+    {
+      name: "externalize-optional-natives",
+      setup(b) {
+        const optional = [
+          // pino transports
+          /^pino-pretty$/,
+          /^thread-stream$/,
+          // jsdom optional canvas backend
+          /^canvas$/,
+          // sharp optional simd builds we don't know about at build time
+          /^@img\/sharp-.*$/,
+          /^@embedded-postgres\/.*$/,
+        ];
+        b.onResolve({ filter: /.*/ }, (args) => {
+          if (optional.some((p) => p.test(args.path))) {
+            return { path: args.path, external: true };
+          }
+          return null;
+        });
+      },
+    },
+  ],
+  logLevel: "info",
+  metafile: true,
+};
+
+async function runOnce() {
+  await Promise.all([build(mainConfig), build(serverConfig)]);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[electron] built ${pkg.name}@${pkg.version} -> dist/main.mjs + dist/server.bundle.mjs`,
+  );
+}
+
+async function runWatch() {
+  const [mainCtx, serverCtx] = await Promise.all([
+    context(mainConfig),
+    context(serverConfig),
+  ]);
+  await Promise.all([mainCtx.watch(), serverCtx.watch()]);
+  // eslint-disable-next-line no-console
+  console.log(
+    `[electron] watching ${pkg.name}@${pkg.version} (main + server bundles)`,
+  );
+}
+
 if (watch) {
-  const ctx = await context(config);
-  await ctx.watch();
-  // eslint-disable-next-line no-console
-  console.log(`[electron] watching ${pkg.name}@${pkg.version}`);
+  await runWatch();
 } else {
-  await build(config);
-  // eslint-disable-next-line no-console
-  console.log(`[electron] built ${pkg.name}@${pkg.version} -> dist/main.mjs`);
+  await runOnce();
 }

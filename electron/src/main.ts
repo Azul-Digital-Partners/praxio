@@ -1,20 +1,31 @@
 /**
  * Praxio Electron main process.
  *
- * Boots the Praxio server in-process, waits for it to listen on a port, then
- * opens a single BrowserWindow pointed at the server's local URL.
+ * Forks the Praxio server in a Node-compatible utility process, waits for it
+ * to report a listen URL over its parent port, then opens a single
+ * BrowserWindow pointed at that URL.
  *
  * Lifecycle:
  *   - Single-instance lock: a second launch focuses the existing window.
  *   - macOS: app stays alive when last window closes; reactivation opens window.
- *   - All platforms: server is shut down on app quit.
+ *   - All platforms: server utility process is terminated on app quit.
+ *
+ * Why a utility process and not an in-main `import @paperclipai/server`?
+ *   1. The embedded server pulls in ~190 transitive deps and an embedded-postgres
+ *      cold start that would block the main thread before the BrowserWindow
+ *      can paint. Running it out-of-process keeps the UI responsive.
+ *   2. A crash in the server process no longer takes down the Electron
+ *      renderer / main process.
+ *   3. The packaged app does not need a working pnpm workspace symlink graph
+ *      inside `app.asar` — the server is shipped as a single pre-bundled
+ *      `server.bundle.mjs` that inlines its workspace deps.
  */
 
-import { app, BrowserWindow, shell, Menu } from "electron";
+import { app, BrowserWindow, shell, Menu, utilityProcess } from "electron";
+import type { UtilityProcess } from "electron";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdirSync } from "node:fs";
-import type { StartedServer } from "@paperclipai/server";
+import { mkdirSync, createWriteStream } from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,16 +49,41 @@ const userDataDir = (() => {
   return dir;
 })();
 
-// Point Paperclip at the per-user data dir before importing/running the server.
-// `loadConfig` reads PAPERCLIP_HOME to derive embedded-postgres dir, secrets dir,
-// and on-disk state. Using userData keeps each install isolated and survives upgrades.
+// Per-user log directory. macOS convention is ~/Library/Logs/<AppName>.
+// Electron's `getPath("logs")` returns that on macOS and a sensible default
+// on Linux/Windows. We pipe the utility-process stdio there so users (and
+// support) can read server logs without rebuilding.
+const logsDir = (() => {
+  const dir = app.getPath("logs");
+  mkdirSync(dir, { recursive: true });
+  return dir;
+})();
+const serverLogPath = join(logsDir, "server.log");
+
+// Point Paperclip at the per-user data dir before forking the server.
+// `loadConfig` reads PAPERCLIP_HOME to derive embedded-postgres dir, secrets
+// dir, and on-disk state. Using userData keeps each install isolated and
+// survives upgrades.
 process.env.PAPERCLIP_HOME ??= userDataDir;
 // In a packaged app we never want to prompt for migrations — auto-apply.
 process.env.PAPERCLIP_MIGRATION_AUTO_APPLY ??= "true";
 process.env.PAPERCLIP_MIGRATION_PROMPT ??= "never";
 
+// Resources that ship in the packaged .app's Resources/app/* tree. In dev
+// (electron started against `electron/dist/main.mjs`) these point at the repo
+// source so the same code path works for `pnpm run dev`.
+const resourcesRoot = process.resourcesPath ?? join(__dirname, "..", "..");
+const packagedUiDist = join(resourcesRoot, "app", "server", "ui-dist");
+const packagedMigrationsDir = join(resourcesRoot, "app", "packages", "db", "migrations");
+
+// Only set the override if it isn't already specified by the user — this lets
+// developers point at a different UI build via env without rebuilding.
+process.env.PAPERCLIP_UI_DIST ??= packagedUiDist;
+process.env.PAPERCLIP_DB_MIGRATIONS_DIR ??= packagedMigrationsDir;
+
 let mainWindow: BrowserWindow | null = null;
-let started: StartedServer | null = null;
+let serverChild: UtilityProcess | null = null;
+let serverUrl: string | null = null;
 let isQuitting = false;
 
 function logInfo(...args: unknown[]): void {
@@ -61,16 +97,88 @@ function logError(...args: unknown[]): void {
   console.error("[praxio]", ...args);
 }
 
-async function bootServer(): Promise<StartedServer> {
-  logInfo("starting embedded server (PAPERCLIP_HOME=", process.env.PAPERCLIP_HOME, ")");
-  // Dynamic import so we can set env vars above first.
-  const { startServer } = await import("@paperclipai/server");
-  const s = await startServer();
-  logInfo("server listening", { host: s.host, port: s.listenPort, apiUrl: s.apiUrl });
-  return s;
+interface ServerStartedMessage {
+  type: "started";
+  apiUrl: string;
+  host: string;
+  listenPort: number;
 }
 
-function createWindow(serverUrl: string): BrowserWindow {
+interface ServerErrorMessage {
+  type: "error";
+  message: string;
+  stack?: string;
+}
+
+type ServerMessage = ServerStartedMessage | ServerErrorMessage;
+
+async function bootServer(): Promise<string> {
+  const serverBundle = join(__dirname, "server.bundle.mjs");
+  logInfo("forking server utility process", {
+    bundle: serverBundle,
+    PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
+    PAPERCLIP_UI_DIST: process.env.PAPERCLIP_UI_DIST,
+    PAPERCLIP_DB_MIGRATIONS_DIR: process.env.PAPERCLIP_DB_MIGRATIONS_DIR,
+    logFile: serverLogPath,
+  });
+
+  const child = utilityProcess.fork(serverBundle, [], {
+    serviceName: "praxio-server",
+    // Inherit env (PAPERCLIP_*, PATH, HOME, etc.) — utilityProcess defaults
+    // to inheriting the parent env, but we re-pass it explicitly to make
+    // the contract obvious for future maintainers.
+    env: { ...process.env },
+    // Pipe stdio so we can capture it into the rolling log file.
+    stdio: "pipe",
+  });
+
+  // Append (not truncate) so a single user session keeps history across
+  // a relaunch within a tight loop. Caller is responsible for rotation.
+  const logStream = createWriteStream(serverLogPath, { flags: "a" });
+  logStream.write(`\n--- server start ${new Date().toISOString()} ---\n`);
+  child.stdout?.pipe(logStream, { end: false });
+  child.stderr?.pipe(logStream, { end: false });
+
+  return await new Promise<string>((resolve, reject) => {
+    const startupTimeout = setTimeout(() => {
+      reject(new Error("server did not report listening within 60s"));
+    }, 60_000);
+
+    child.on("message", (raw) => {
+      const msg = raw as ServerMessage;
+      if (msg?.type === "started") {
+        clearTimeout(startupTimeout);
+        logInfo("server reported listening", {
+          host: msg.host,
+          port: msg.listenPort,
+          apiUrl: msg.apiUrl,
+        });
+        serverUrl = msg.apiUrl;
+        resolve(msg.apiUrl);
+        return;
+      }
+      if (msg?.type === "error") {
+        clearTimeout(startupTimeout);
+        logError("server reported error", msg.message, msg.stack);
+        reject(new Error(`server start failed: ${msg.message}`));
+        return;
+      }
+    });
+
+    child.on("exit", (code) => {
+      clearTimeout(startupTimeout);
+      logError("server process exited", { code });
+      if (!serverUrl) {
+        reject(new Error(`server exited before listening (code=${code})`));
+      }
+      serverChild = null;
+    });
+
+    serverChild = child;
+  });
+}
+
+function createWindow(url: string): BrowserWindow {
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -94,22 +202,22 @@ function createWindow(serverUrl: string): BrowserWindow {
   });
 
   // Open external links in the user's default browser instead of in-app.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      const local = serverUrl.replace(/\/$/, "");
-      if (!url.startsWith(local)) {
-        void shell.openExternal(url);
+  win.webContents.setWindowOpenHandler(({ url: target }) => {
+    if (target.startsWith("http://") || target.startsWith("https://")) {
+      const local = url.replace(/\/$/, "");
+      if (!target.startsWith(local)) {
+        void shell.openExternal(target);
         return { action: "deny" };
       }
     }
     return { action: "allow" };
   });
 
-  win.webContents.on("will-navigate", (event, url) => {
-    const local = serverUrl.replace(/\/$/, "");
-    if (!url.startsWith(local)) {
+  win.webContents.on("will-navigate", (event, target) => {
+    const local = url.replace(/\/$/, "");
+    if (!target.startsWith(local)) {
       event.preventDefault();
-      void shell.openExternal(url);
+      void shell.openExternal(target);
     }
   });
 
@@ -119,16 +227,16 @@ function createWindow(serverUrl: string): BrowserWindow {
     }
   });
 
-  void win.loadURL(serverUrl);
+  void win.loadURL(url);
   return win;
 }
 
 async function ensureWindow(): Promise<void> {
-  if (!started) {
-    started = await bootServer();
+  if (!serverUrl) {
+    serverUrl = await bootServer();
   }
   if (!mainWindow || mainWindow.isDestroyed()) {
-    mainWindow = createWindow(started.apiUrl);
+    mainWindow = createWindow(serverUrl);
   } else {
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
@@ -157,20 +265,29 @@ app.on("before-quit", () => {
 });
 
 app.on("will-quit", (event) => {
-  if (!started) return;
-  if (isQuitting && started.server.listening) {
+  if (!serverChild) return;
+  if (isQuitting) {
     event.preventDefault();
     try {
-      started.server.close(() => {
-        started = null;
+      // Ask politely first, fall back to kill, then exit.
+      serverChild.postMessage({ type: "shutdown" });
+      const child = serverChild;
+      const hardTimer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch (err) {
+          logError("error killing server on quit", err);
+        }
+        app.exit(0);
+      }, 5_000);
+      hardTimer.unref();
+      child.once("exit", () => {
+        clearTimeout(hardTimer);
+        serverChild = null;
         app.exit(0);
       });
-      // Hard timeout — don't hang forever.
-      setTimeout(() => {
-        app.exit(0);
-      }, 5_000).unref();
     } catch (err) {
-      logError("error closing server on quit", err);
+      logError("error stopping server on quit", err);
       app.exit(0);
     }
   }
@@ -185,7 +302,6 @@ void app.whenReady().then(async () => {
     await ensureWindow();
   } catch (err) {
     logError("failed to boot Praxio server", err);
-    // Show a minimal error to the user via a blank window load failure.
     // Future: render a static error page bundled with the app.
     app.exit(1);
   }
@@ -198,6 +314,3 @@ process.on("uncaughtException", (err) => {
 process.on("unhandledRejection", (err) => {
   logError("unhandledRejection", err);
 });
-
-// Silence eslint about unused __dirname in some configurations.
-void __dirname;

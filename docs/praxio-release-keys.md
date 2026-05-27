@@ -76,8 +76,11 @@ gh secret set PRAXIO_MINISIGN_KEY_PASSWORD \
   --env praxio-release \
   --repo Azul-Digital-Partners/praxio
 
-# Publish the public half (anyone can have it — this is the verify side)
+# Publish the public half (anyone can have it — this is the verify side).
+# Downloads distribution is DigitalOcean Spaces + DO CDN per AZU-1850; aws CLI
+# works against Spaces with the endpoint override.
 aws s3 cp minisign.pub s3://praxio-downloads/minisign.pub \
+  --endpoint-url https://nyc3.digitaloceanspaces.com \
   --content-type text/plain --cache-control "max-age=86400"
 
 # Shred local copies once you have confirmed 1Password + GH secret are both populated

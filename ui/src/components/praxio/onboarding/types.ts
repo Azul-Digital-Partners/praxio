@@ -50,6 +50,20 @@ export interface PraxioToolConnection {
   connectedAt?: string;
 }
 
+/** A connected Slack workspace. Modelled as an array on state so the user
+ *  can attach multiple workspaces without a future schema migration
+ *  (engineering note on AZU-741). v1.0 UX only collects one in onboarding,
+ *  but the data model is multi-workspace from day one. */
+export interface SlackWorkspace {
+  /** Stable id assigned by the OAuth callback (team id in real OAuth;
+   *  a synthetic id in the simulated v1 flow). */
+  id: string;
+  /** Human-readable workspace name. */
+  name: string;
+  /** Default channel id the CoS will post to. Null until the user picks one. */
+  defaultChannel: string | null;
+}
+
 export interface PraxioOnboardingState {
   /** Schema version — bump if state shape changes incompatibly. */
   version: 1;
@@ -81,6 +95,9 @@ export interface PraxioOnboardingState {
   /** Step 5 — Tool Connections. */
   toolConnections: PraxioToolConnection[];
   defaultDeliveryChannel: PraxioPrimaryTool | null;
+  /** Connected Slack workspaces (multi-workspace data model — see
+   *  `SlackWorkspace` above and engineering note on AZU-741). */
+  slackWorkspaces: SlackWorkspace[];
 
   /** Step 6 — Goals. */
   focusTheme: string;
@@ -109,6 +126,7 @@ export function makeEmptyState(now: () => string = () => new Date().toISOString(
     toolCategories: [],
     toolConnections: [],
     defaultDeliveryChannel: null,
+    slackWorkspaces: [],
     focusTheme: '',
     topGoals: [],
     cycleEndDate: null,

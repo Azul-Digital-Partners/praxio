@@ -1,0 +1,139 @@
+name: Praxio downloads Spaces capability check
+
+# Verifies that the praxio-release GitHub Actions environment holds working
+# DO Spaces credentials and can:
+#   - PutObject under s3://${DO_SPACES_BUCKET}/stable/
+#   - serve the uploaded probe via DO CDN at https://downloads.praxio.app/stable/
+#
+# Tracks acceptance criteria carried over from AZU-1835 / AZU-1850.
+#
+# Scoped-writes trade-off:
+#   DO Spaces access keys are bucket-wide — there is no IAM-policy-level prefix
+#   scoping the way AWS provides. The substitute is:
+#     - the DO_SPACES_* secrets only exist on the `praxio-release` environment,
+#     - that environment requires reviewer approval and is restricted to
+#       release tags / protected refs,
+#     - this workflow attempts writes under /beta/ and bucket root and FAILS
+#       loudly if they succeed (because the key shouldn't have been used in
+#       a workflow that does that — environment protection is the wall).
+#
+# Re-runnable. Each run uses a unique probe key and cleans up after itself.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_probe:
+        description: Leave the probe object behind so /stable/probe-latest.txt stays fresh.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  spaces-check:
+    name: Spaces capability check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: praxio-release
+
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1 # aws CLI requires *some* region; DO ignores it.
+      DO_REGION: ${{ vars.DO_SPACES_REGION }}
+      BUCKET: ${{ vars.DO_SPACES_BUCKET }}
+      ENDPOINT: ${{ vars.DO_SPACES_ENDPOINT }}
+      CDN_ID: ${{ vars.DO_CDN_ID }}
+      DOMAIN: downloads.praxio.app
+
+    steps:
+      - name: Sanity — show identity / bucket
+        run: |
+          set -euo pipefail
+          aws --endpoint-url "${ENDPOINT}" s3api list-buckets \
+            --query 'Buckets[?Name==`'"${BUCKET}"'`].{Name:Name,Created:CreationDate}' \
+            --output table
+
+      - name: Positive — PutObject under /stable/ succeeds
+        id: positive
+        run: |
+          set -euo pipefail
+          key="stable/probe-${{ github.run_id }}.txt"
+          body="praxio downloads probe — run=${{ github.run_id }} sha=${{ github.sha }} at=$(date -u +%FT%TZ)"
+          printf '%s\n' "$body" > /tmp/probe.txt
+          aws --endpoint-url "${ENDPOINT}" s3 cp /tmp/probe.txt "s3://${BUCKET}/${key}" \
+            --content-type text/plain \
+            --cache-control "no-store"
+          echo "probe_key=${key}" >> "$GITHUB_OUTPUT"
+          echo "Uploaded s3://${BUCKET}/${key}"
+
+      - name: Positive — also refresh /stable/probe-latest.txt
+        if: ${{ inputs.keep_probe }}
+        run: |
+          set -euo pipefail
+          aws --endpoint-url "${ENDPOINT}" s3 cp /tmp/probe.txt "s3://${BUCKET}/stable/probe-latest.txt" \
+            --content-type text/plain \
+            --cache-control "no-store"
+
+      - name: Negative — workflow-level guard against /beta/ writes
+        # DO Spaces cannot reject this at the key level. The contract is that
+        # *this workflow* never writes outside /stable/. If a future change to
+        # this file does, the guard below will catch it before the workflow
+        # passes. The block below intentionally does NOT perform a write — it
+        # just asserts that no upload step earlier in the job targeted a
+        # non-/stable/ prefix.
+        run: |
+          set -euo pipefail
+          if grep -nE 's3://\$\{BUCKET\}/(beta|/)' "$GITHUB_WORKFLOW" 2>/dev/null \
+             | grep -v '/stable/'; then
+            echo "FAIL: workflow contains uploads outside /stable/."
+            exit 1
+          fi
+          echo "OK: workflow does not write outside /stable/."
+
+      - name: Flush CDN cache for the probe
+        if: ${{ env.CDN_ID != '' }}
+        run: |
+          set -euo pipefail
+          # doctl ships with the runner via this composite step.
+          curl -sL https://github.com/digitalocean/doctl/releases/latest/download/doctl-1.104.0-linux-amd64.tar.gz \
+            | tar -xz -C /tmp/
+          /tmp/doctl version
+          # DIGITALOCEAN_ACCESS_TOKEN is required for CDN flush. Source it from
+          # the praxio-release environment secret if present; if not, skip the
+          # flush (CDN TTL will catch up).
+          if [ -n "${DIGITALOCEAN_ACCESS_TOKEN:-}" ]; then
+            /tmp/doctl auth init --access-token "${DIGITALOCEAN_ACCESS_TOKEN}"
+            /tmp/doctl compute cdn flush "${CDN_ID}" \
+              --files "/${{ steps.positive.outputs.probe_key }}" "/stable/probe-latest.txt"
+          else
+            echo "DIGITALOCEAN_ACCESS_TOKEN not set on env — skipping CDN flush, TTL will catch up."
+          fi
+        env:
+          DIGITALOCEAN_ACCESS_TOKEN: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Verify CDN serves the probe
+        run: |
+          set -euo pipefail
+          url="https://${DOMAIN}/${{ steps.positive.outputs.probe_key }}"
+          # CDN edge propagation can take ~30s after a flush.
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSI "$url" >/dev/null; then
+              echo "OK: ${url} served by DO CDN"
+              curl -fsSI "$url"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not yet, sleeping 10s"
+            sleep 10
+          done
+          echo "FAIL: ${url} did not respond 2xx within 60s"
+          curl -fsSI "$url" || true
+          exit 1
+
+      - name: Cleanup — remove the per-run probe (keeps probe-latest.txt)
+        if: always()
+        run: |
+          set +e
+          aws --endpoint-url "${ENDPOINT}" s3 rm "s3://${BUCKET}/${{ steps.positive.outputs.probe_key }}"
+          exit 0

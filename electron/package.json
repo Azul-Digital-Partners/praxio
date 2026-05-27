@@ -1,5 +1,6 @@
 {
   "name": "@paperclipai/electron",
+  "productName": "Praxio",
   "version": "0.1.0",
   "private": true,
   "description": "Praxio desktop shell (Electron) — boots the Praxio server and renders the UI in a native window.",
@@ -19,6 +20,8 @@
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.121",
     "@cursor/sdk": "^1.0.12",
+    "@embedded-postgres/darwin-arm64": "18.1.0-beta.16",
+    "@embedded-postgres/darwin-x64": "18.1.0-beta.16",
     "embedded-postgres": "^18.1.0-beta.16",
     "hermes-paperclip-adapter": "^0.2.0",
     "jsdom": "^28.1.0",

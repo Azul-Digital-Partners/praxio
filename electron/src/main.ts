@@ -84,6 +84,13 @@ process.env.PAPERCLIP_DB_MIGRATIONS_DIR ??= packagedMigrationsDir;
 let mainWindow: BrowserWindow | null = null;
 let serverChild: UtilityProcess | null = null;
 let serverUrl: string | null = null;
+// Cached bootServer() promise — if `app.whenReady` and `app.on("activate")`
+// fire back-to-back (which they do on cold launch on macOS), both call
+// `ensureWindow()` before `serverUrl` is set. Without this guard we end up
+// forking two utility processes that race on embedded-postgres init, leaving
+// the cluster half-initialized and the lock file from one process blocking
+// the other.
+let serverBootPromise: Promise<string> | null = null;
 let isQuitting = false;
 
 function logInfo(...args: unknown[]): void {
@@ -113,7 +120,18 @@ interface ServerErrorMessage {
 type ServerMessage = ServerStartedMessage | ServerErrorMessage;
 
 async function bootServer(): Promise<string> {
-  const serverBundle = join(__dirname, "server.bundle.mjs");
+  // The server bundle does `import("@embedded-postgres/<arch>")` (ESM dynamic
+  // import). Node's ESM resolver picks the resolution context from the
+  // importing file's *literal* on-disk path. Inside a packaged Electron app,
+  // the bundle lives at `Resources/app.asar/dist/server.bundle.mjs`. asarUnpack
+  // copies the per-arch native packages into `app.asar.unpacked/node_modules/`,
+  // but ESM resolution never crosses from `app.asar` into `app.asar.unpacked`.
+  // Forking the bundle directly from its unpacked twin keeps the entire
+  // resolution chain on the real filesystem.
+  const asarBundle = join(__dirname, "server.bundle.mjs");
+  const serverBundle = asarBundle.includes("/app.asar/")
+    ? asarBundle.replace("/app.asar/", "/app.asar.unpacked/")
+    : asarBundle;
   logInfo("forking server utility process", {
     bundle: serverBundle,
     PAPERCLIP_HOME: process.env.PAPERCLIP_HOME,
@@ -233,7 +251,8 @@ function createWindow(url: string): BrowserWindow {
 
 async function ensureWindow(): Promise<void> {
   if (!serverUrl) {
-    serverUrl = await bootServer();
+    serverBootPromise ??= bootServer();
+    serverUrl = await serverBootPromise;
   }
   if (!mainWindow || mainWindow.isDestroyed()) {
     mainWindow = createWindow(serverUrl);

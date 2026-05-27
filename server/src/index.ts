@@ -921,7 +921,12 @@ function isMainModule(metaUrl: string): boolean {
   }
 }
 
-if (isMainModule(import.meta.url)) {
+// Auto-start when invoked as a script (`tsx src/index.ts`, `node dist/index.js`).
+// Skip when running inside an Electron utility process — `parentPort` is only
+// present there, and server-entry.ts wraps startServer() so the parent can
+// receive the resolved listen URL. Auto-starting in that context produces a
+// second parallel startServer() call that races on embedded-postgres init.
+if (isMainModule(import.meta.url) && !(process as unknown as { parentPort?: unknown }).parentPort) {
   void startServer().catch((err) => {
     logger.error({ err }, "Paperclip server failed to start");
     process.exit(1);

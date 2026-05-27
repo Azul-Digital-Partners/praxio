@@ -181,6 +181,34 @@ const serverConfig = {
         });
       },
     },
+    {
+      // is-promise@4 ships dual ESM/CJS via an exports map:
+      //   "import" -> ./index.mjs (export default fn)
+      //   "require" -> ./index.js  (module.exports = fn)
+      // Our `conditions: ["node","import","default"]` resolves this to the
+      // ESM file even when the importer is bundled CJS (router@2/lib/layer.js
+      // does `const isPromise = require("is-promise")`). esbuild's
+      // `__toCommonJS(is_promise_exports)` then yields `{ default: fn }`
+      // instead of the bare function — and the call site `isPromise3(ret)`
+      // crashes with "isPromise3 is not a function" on every HTTP request.
+      // Let esbuild resolve normally, then rewrite the resulting
+      // .../is-promise/index.mjs to .../is-promise/index.js.
+      name: "force-cjs-is-promise",
+      setup(b) {
+        b.onResolve({ filter: /^is-promise$/ }, async (args) => {
+          if (args.pluginData?.isPromiseRewrite) return null;
+          const r = await b.resolve(args.path, {
+            importer: args.importer,
+            kind: args.kind,
+            resolveDir: args.resolveDir,
+            namespace: args.namespace,
+            pluginData: { isPromiseRewrite: true },
+          });
+          if (r.errors.length) return r;
+          return { path: r.path.replace(/\/is-promise\/index\.mjs$/, "/is-promise/index.js") };
+        });
+      },
+    },
   ],
   logLevel: "info",
   metafile: true,

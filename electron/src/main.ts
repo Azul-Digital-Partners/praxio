@@ -21,20 +21,46 @@
  *      `server.bundle.mjs` that inlines its workspace deps.
  */
 
-import { app, BrowserWindow, shell, Menu, utilityProcess } from "electron";
+import { app, BrowserWindow, shell, Menu, utilityProcess, ipcMain } from "electron";
 import type { UtilityProcess } from "electron";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdirSync, createWriteStream } from "node:fs";
+import {
+  mkdirSync,
+  createWriteStream,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // Single-instance lock — a second launch should just focus the existing window.
+// Combined with the `second-instance` handler below, this guarantees we never
+// fork a duplicate utility-process server, which would race on the embedded
+// postgres lock file and leave a half-initialized cluster behind.
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
   process.exit(0);
+}
+
+// Register `praxio://` as the default URL scheme for this app so links like
+// `praxio://open` focus the running window (handled in the `open-url` and
+// `second-instance` listeners below). Must be called before `app.whenReady`.
+// On packaged macOS builds Electron uses the embedded Info.plist URL types
+// declaration; calling this at runtime registers the LaunchServices entry on
+// first launch and is a no-op afterwards.
+if (process.defaultApp) {
+  // Dev mode: argv is `electron dist/main.mjs`, so we pass the script path.
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient("praxio", process.execPath, [
+      join(process.argv[1]!),
+    ]);
+  }
+} else {
+  app.setAsDefaultProtocolClient("praxio");
 }
 
 // Configure userData directory before Electron initializes anything that reads it.
@@ -81,7 +107,73 @@ const packagedMigrationsDir = join(resourcesRoot, "app", "packages", "db", "migr
 process.env.PAPERCLIP_UI_DIST ??= packagedUiDist;
 process.env.PAPERCLIP_DB_MIGRATIONS_DIR ??= packagedMigrationsDir;
 
+// On-disk state files inside userData. Kept as flat JSON instead of a single
+// preferences blob so each subsystem (first-run, telemetry, future) owns its
+// own file and we can evolve schemas independently.
+const firstRunStatePath = join(userDataDir, "first-run.json");
+const telemetryStatePath = join(userDataDir, "telemetry.json");
+
+interface FirstRunState {
+  completedAt: string | null;
+  // Recorded so we can later distinguish "user dismissed at vX" from "fresh
+  // install on vX" if a future release wants to re-show a what's-new modal.
+  completedVersion: string | null;
+}
+
+interface TelemetryState {
+  enabled: boolean;
+  // Wall-clock timestamp of the user's choice. The recorded copy of the
+  // welcome modal will live in this file too once we add ToS / privacy
+  // versioning; for Phase B we only persist the bare consent.
+  decidedAt: string | null;
+  // Phase B does not transmit anything. Keep a marker so a future Phase C
+  // transmitter can prove the consent flow was actually exercised on disk
+  // instead of inferred from default-off.
+  consentVersion: 1;
+}
+
+function readJsonFile<T>(path: string): T | null {
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as T;
+  } catch (err) {
+    logError("failed to read JSON state", path, err);
+    return null;
+  }
+}
+
+function writeJsonFile(path: string, value: unknown): void {
+  try {
+    writeFileSync(path, JSON.stringify(value, null, 2) + "\n", "utf8");
+  } catch (err) {
+    logError("failed to write JSON state", path, err);
+  }
+}
+
+function isFirstRun(): boolean {
+  const state = readJsonFile<FirstRunState>(firstRunStatePath);
+  return !state || !state.completedAt;
+}
+
+function recordFirstRunComplete(): void {
+  const state: FirstRunState = {
+    completedAt: new Date().toISOString(),
+    completedVersion: app.getVersion(),
+  };
+  writeJsonFile(firstRunStatePath, state);
+}
+
+function recordTelemetryChoice(enabled: boolean): void {
+  const state: TelemetryState = {
+    enabled,
+    decidedAt: new Date().toISOString(),
+    consentVersion: 1,
+  };
+  writeJsonFile(telemetryStatePath, state);
+}
+
 let mainWindow: BrowserWindow | null = null;
+let welcomeWindow: BrowserWindow | null = null;
 let serverChild: UtilityProcess | null = null;
 let serverUrl: string | null = null;
 // Cached bootServer() promise — if `app.whenReady` and `app.on("activate")`
@@ -262,9 +354,165 @@ async function ensureWindow(): Promise<void> {
   }
 }
 
-app.on("second-instance", () => {
-  // Someone tried to launch a second copy — focus our window instead.
+/**
+ * Create + show the first-run welcome modal. Returns the window so the caller
+ * can await its `closed` event if it needs to block on user action.
+ *
+ * The window is fixed-size and non-resizable on purpose — the modal copy is
+ * tuned for one screen, and a resizable welcome panel would make the cancel /
+ * dismiss affordance ambiguous. CSP is locked down inside `welcome.html`.
+ */
+function showWelcomeWindow(): BrowserWindow {
+  if (welcomeWindow && !welcomeWindow.isDestroyed()) {
+    welcomeWindow.focus();
+    return welcomeWindow;
+  }
+  const htmlPath = join(__dirname, "welcome.html");
+  const preloadPath = join(__dirname, "welcome-preload.cjs");
+  const win = new BrowserWindow({
+    width: 600,
+    height: 560,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    backgroundColor: "#0b0f17",
+    title: "Welcome to Praxio",
+    autoHideMenuBar: process.platform !== "darwin",
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "default",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: preloadPath,
+    },
+  });
+  win.once("ready-to-show", () => {
+    win.show();
+    win.focus();
+  });
+  win.on("closed", () => {
+    if (welcomeWindow === win) {
+      welcomeWindow = null;
+    }
+  });
+  // Welcome window only ever loads our bundled local file. Block any
+  // navigation away from it.
+  win.webContents.on("will-navigate", (event) => {
+    event.preventDefault();
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  void win.loadFile(htmlPath);
+  welcomeWindow = win;
+  return win;
+}
+
+/**
+ * Build the macOS application menu (About / Preferences / Hide / Quit). On
+ * Linux + Windows we leave the default minimal chrome alone — the standard
+ * window-frame Close/Minimize buttons are sufficient for Phase B.
+ *
+ * "Preferences…" is a placeholder per Phase B scope — it currently re-opens
+ * the welcome modal so users can revisit the telemetry choice without us
+ * shipping a full Settings panel (deferred to a future phase).
+ */
+function buildAppMenu(): void {
+  if (process.platform !== "darwin") {
+    Menu.setApplicationMenu(null);
+    return;
+  }
+  const template: Electron.MenuItemConstructorOptions[] = [
+    {
+      label: "Praxio",
+      submenu: [
+        { role: "about" },
+        { type: "separator" },
+        {
+          label: "Preferences…",
+          accelerator: "Cmd+,",
+          click: () => {
+            showWelcomeWindow();
+          },
+        },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      role: "windowMenu",
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+/**
+ * React to a `praxio://...` URL handed to us by either a `second-instance`
+ * launch (Windows / Linux) or `open-url` (macOS).
+ *
+ * Phase B scope is intentionally narrow: any praxio:// URL just focuses the
+ * window. Deeper deep-link routing (per the parent plan) is a product-roadmap
+ * concern, not packaging.
+ */
+function handlePraxioUrl(url: string): void {
+  logInfo("praxio:// URL received", url);
   void ensureWindow();
+}
+
+function extractPraxioUrl(argv: readonly string[]): string | null {
+  for (const arg of argv) {
+    if (typeof arg === "string" && arg.startsWith("praxio://")) {
+      return arg;
+    }
+  }
+  return null;
+}
+
+app.on("second-instance", (_event, argv) => {
+  // Someone tried to launch a second copy — focus our window instead. The
+  // single-instance lock above already prevented the duplicate Electron
+  // process from continuing past startup, so by the time we get here we know
+  // we are the surviving primary and just need to surface the window.
+  const url = extractPraxioUrl(argv);
+  if (url) {
+    handlePraxioUrl(url);
+  } else {
+    void ensureWindow();
+  }
+});
+
+// macOS: deep links arrive via `open-url` instead of being appended to argv.
+// Register the listener at module scope so a launch-from-link wakeup before
+// `app.whenReady` is still captured (Electron buffers these until ready).
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  handlePraxioUrl(url);
 });
 
 app.on("window-all-closed", () => {
@@ -285,43 +533,105 @@ app.on("before-quit", () => {
 
 app.on("will-quit", (event) => {
   if (!serverChild) return;
-  if (isQuitting) {
-    event.preventDefault();
-    try {
-      // Ask politely first, fall back to kill, then exit.
-      serverChild.postMessage({ type: "shutdown" });
-      const child = serverChild;
-      const hardTimer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch (err) {
-          logError("error killing server on quit", err);
-        }
-        app.exit(0);
-      }, 5_000);
-      hardTimer.unref();
-      child.once("exit", () => {
-        clearTimeout(hardTimer);
-        serverChild = null;
-        app.exit(0);
-      });
-    } catch (err) {
-      logError("error stopping server on quit", err);
-      app.exit(0);
-    }
+  if (!isQuitting) return;
+
+  // Three-stage quit:
+  //   t=0    graceful — postMessage({type:"shutdown"}) so the server can
+  //          stop embedded postgres via its own async-exit-hook chain.
+  //   t=5s   SIGTERM via utilityProcess.kill() if the server hasn't exited.
+  //   t=6s   SIGKILL via process.kill(pid,"SIGKILL") as the no-orphan
+  //          backstop. Without this we observed lingering postgres workers
+  //          when the server got wedged mid-startup (the SIGTERM never
+  //          reached the child postgres tree).
+  //
+  // The "no ghost postgres processes" line in the acceptance criteria is
+  // why stage 3 exists. Stage 2 is the polite intermediate.
+  event.preventDefault();
+  const child = serverChild;
+  let finished = false;
+
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    serverChild = null;
+    app.exit(0);
+  };
+
+  try {
+    child.postMessage({ type: "shutdown" });
+  } catch (err) {
+    logError("error posting shutdown to server", err);
   }
+
+  const sigtermTimer = setTimeout(() => {
+    try {
+      logError("server did not exit within 5s of shutdown, sending SIGTERM");
+      child.kill();
+    } catch (err) {
+      logError("error sending SIGTERM to server", err);
+    }
+  }, 5_000);
+  sigtermTimer.unref();
+
+  const sigkillTimer = setTimeout(() => {
+    const pid = (child as unknown as { pid?: number }).pid;
+    if (typeof pid === "number") {
+      try {
+        logError("server did not exit within 6s, sending SIGKILL", { pid });
+        process.kill(pid, "SIGKILL");
+      } catch (err) {
+        logError("error sending SIGKILL to server", err);
+      }
+    }
+    finish();
+  }, 6_000);
+  sigkillTimer.unref();
+
+  child.once("exit", () => {
+    clearTimeout(sigtermTimer);
+    clearTimeout(sigkillTimer);
+    finish();
+  });
+});
+
+// IPC: the welcome modal's "Get started" button reaches here via the
+// `welcome-preload.cjs` contextBridge. We persist the consent choice, record
+// the first-run completion, close the modal, and then open the main window.
+ipcMain.on("praxio:welcome:complete", (event, payload: unknown) => {
+  const telemetryEnabled = !!(
+    payload &&
+    typeof payload === "object" &&
+    "telemetryEnabled" in payload &&
+    (payload as { telemetryEnabled?: unknown }).telemetryEnabled
+  );
+  logInfo("welcome modal completed", { telemetryEnabled });
+  recordTelemetryChoice(telemetryEnabled);
+  // recordFirstRunComplete is idempotent — if the user opened the modal via
+  // Preferences after first run we still rewrite the timestamp, which is
+  // harmless and gives us a "last revisited" signal for free.
+  recordFirstRunComplete();
+  const sender = BrowserWindow.fromWebContents(event.sender);
+  if (sender && !sender.isDestroyed()) {
+    sender.close();
+  }
+  void ensureWindow();
 });
 
 void app.whenReady().then(async () => {
-  // On macOS we hide the default menu chrome but still keep the system menu.
-  if (process.platform !== "darwin") {
-    Menu.setApplicationMenu(null);
-  }
+  buildAppMenu();
   try {
-    await ensureWindow();
+    if (isFirstRun()) {
+      // Show the welcome modal first and let the IPC handler trigger the
+      // server boot + main window. Starting the server in parallel here is
+      // tempting but doubles the chance the embedded postgres init blows up
+      // before we've even rendered the modal, and the welcome flow needs to
+      // feel snappy in the first paint.
+      showWelcomeWindow();
+    } else {
+      await ensureWindow();
+    }
   } catch (err) {
-    logError("failed to boot Praxio server", err);
-    // Future: render a static error page bundled with the app.
+    logError("failed to boot Praxio", err);
     app.exit(1);
   }
 });

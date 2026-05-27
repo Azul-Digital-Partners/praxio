@@ -26,7 +26,7 @@
 import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, copyFileSync, mkdirSync } from "node:fs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -214,11 +214,32 @@ const serverConfig = {
   metafile: true,
 };
 
+/**
+ * Static assets the main process loads at runtime from `dist/` via __dirname:
+ *   - welcome.html         — first-run modal markup
+ *   - welcome-renderer.js  — small in-page script wired by welcome.html
+ *   - welcome-preload.cjs  — contextBridge preload for the modal
+ *
+ * Kept as plain copies (not bundled) so the markup and renderer stay
+ * human-editable and electron-builder ships them via `dist/**\/*`.
+ */
+const WELCOME_ASSETS = ["welcome.html", "welcome-renderer.js", "welcome-preload.cjs"];
+
+function copyWelcomeAssets() {
+  const srcDir = resolve(__dirname, "src");
+  const outDir = resolve(__dirname, "dist");
+  mkdirSync(outDir, { recursive: true });
+  for (const name of WELCOME_ASSETS) {
+    copyFileSync(resolve(srcDir, name), resolve(outDir, name));
+  }
+}
+
 async function runOnce() {
   await Promise.all([build(mainConfig), build(serverConfig)]);
+  copyWelcomeAssets();
   // eslint-disable-next-line no-console
   console.log(
-    `[electron] built ${pkg.name}@${pkg.version} -> dist/main.mjs + dist/server.bundle.mjs`,
+    `[electron] built ${pkg.name}@${pkg.version} -> dist/main.mjs + dist/server.bundle.mjs + welcome assets`,
   );
 }
 
@@ -228,6 +249,9 @@ async function runWatch() {
     context(serverConfig),
   ]);
   await Promise.all([mainCtx.watch(), serverCtx.watch()]);
+  // Watch mode does not re-copy static assets on every change — copy once at
+  // start so the dist tree is complete for `electron dist/main.mjs`.
+  copyWelcomeAssets();
   // eslint-disable-next-line no-console
   console.log(
     `[electron] watching ${pkg.name}@${pkg.version} (main + server bundles)`,

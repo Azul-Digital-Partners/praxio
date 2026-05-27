@@ -9,14 +9,18 @@ export const PRAXIO_ONBOARDING_TOTAL_STEPS = 7;
 /** Step index — 1..7 (1-based for human-readable UI), 0 = "not started". */
 export type PraxioOnboardingStepIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
-/** Roles offered as quick-pick in Step 3 (free text via 'other'). */
+/** Roles offered as quick-pick in Step 3 (free text via 'other').
+ *  AZU-740: Fractional Executive, CEO, COO, CMO, CFO, CRO, Consultant,
+ *  Advisor, Other. */
 export type PraxioRole =
-  | 'fractional-cfo'
-  | 'fractional-cmo'
-  | 'fractional-coo'
-  | 'founder'
-  | 'executive'
+  | 'fractional-executive'
+  | 'ceo'
+  | 'coo'
+  | 'cmo'
+  | 'cfo'
+  | 'cro'
   | 'consultant'
+  | 'advisor'
   | 'other';
 
 /** Tool categories shown in Step 4 (work context). */

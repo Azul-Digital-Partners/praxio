@@ -26,7 +26,12 @@ export function Step4Work() {
     <div className="space-y-4">
       <div>
         <h2 className="text-2xl font-semibold">Tell {cos} about your work</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Brief. We&rsquo;ll use this to suggest tools to connect next.</p>
+        <p className="mt-2 text-sm text-muted-foreground">
+          Brief. We&rsquo;ll use this to suggest tools to connect next.
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground" data-testid="step4-skip-hint">
+          All fields optional — skip and {cos} will fill the gaps in conversation.
+        </p>
       </div>
       <div className="space-y-2">
         <Label htmlFor="praxio-biz">Business or team name</Label>

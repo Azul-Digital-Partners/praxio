@@ -4,11 +4,14 @@ import { usePraxioOnboardingContext } from '../PraxioOnboardingContext';
 
 export function Step6Goals() {
   const { state, setField } = usePraxioOnboardingContext();
+  const cos = state.cosName || 'your Chief of Staff';
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-2xl font-semibold">What&rsquo;s this period about for you?</h2>
-        <p className="mt-2 text-sm text-muted-foreground">Optional. Skip and {state.cosName} will ask in your first conversation.</p>
+        <p className="mt-2 text-sm text-muted-foreground" data-testid="step6-skip-hint">
+          Optional — skip and {cos} will ask you about this in your first conversation.
+        </p>
       </div>
       <div className="space-y-2">
         <Label htmlFor="praxio-focus">Focus theme</Label>

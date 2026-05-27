@@ -2,6 +2,10 @@ appId: com.azuldigital.praxio
 productName: Praxio
 copyright: Copyright (c) 2026 Azul Digital LLC
 
+# Pin Electron version explicitly because the dependency lives in the workspace
+# package (electron/) rather than the repo root where electron-builder runs from.
+electronVersion: "42.3.0"
+
 # Run electron-builder from the repo root; the Electron app code lives in ./electron.
 directories:
   app: electron
@@ -24,11 +28,9 @@ extraResources:
   - from: "server/ui-dist"
     to: "app/server/ui-dist"
     filter: ["**/*"]
-    optional: true
-  - from: "packages/db/drizzle"
-    to: "app/packages/db/drizzle"
+  - from: "packages/db/src/migrations"
+    to: "app/packages/db/migrations"
     filter: ["**/*"]
-    optional: true
 
 # Ensure server + workspace deps are installed in the packaged app.
 npmRebuild: true
@@ -56,12 +58,15 @@ mac:
   entitlementsInherit: electron/build/entitlements.mac.inherit.plist
   # Identity is picked up automatically from the keychain by partial-name match.
   # Set CSC_IDENTITY_AUTO_DISCOVERY=true (default) and the cert must be installed.
-  identity: "Developer ID Application: Azul Digital LLC (LG82A2ZSA4)"
+  identity: "Azul Digital LLC (LG82A2ZSA4)"
   notarize: false  # Notarization runs via the afterSign hook below.
 
 dmg:
   artifactName: "Praxio-${version}-${arch}.dmg"
-  sign: false
+  # Sign the DMG itself with the same Developer ID identity as the .app.
+  # The DMG must be signed *and* the notarization ticket stapled to it for a
+  # clean Gatekeeper experience on first mount.
+  sign: true
   # Standard "drag to Applications" layout.
   contents:
     - x: 130

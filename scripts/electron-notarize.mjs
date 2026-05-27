@@ -84,13 +84,15 @@ export default async function afterSign(context) {
   console.log(`[notarize] submitting ${appPath} to Apple (teamId=${cred.teamId}, keyId=${cred.keyId})`);
   const t0 = Date.now();
   try {
+    // @electron/notarize v2 uses notarytool. Do NOT pass `teamId` here — the
+    // validator routes credentials to "password mode" if it sees teamId, even
+    // alongside an API key, and rejects the call. The Team ID is encoded in
+    // the App Store Connect API key itself, so passing it is redundant.
     await notarize({
-      tool: "notarytool",
       appPath,
       appleApiKey: cred.keyPath,
       appleApiKeyId: cred.keyId,
       appleApiIssuer: cred.issuerId,
-      teamId: cred.teamId,
     });
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`[notarize] succeeded for ${appName} in ${elapsed}s`);

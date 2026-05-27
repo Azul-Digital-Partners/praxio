@@ -7,6 +7,7 @@ import { ConversationThread } from '@/components/praxio/ConversationThread'
 import { useWebSocket } from '@/hooks/praxio/useWebSocket'
 import { useConversation } from '@/hooks/praxio/useConversation'
 import { useTheme } from '@/context/ThemeContext'
+import { PraxioOnboardingGate } from '@/components/praxio/onboarding'
 
 const MOCK_AGENTS: AgentSummary[] = [
   { id: '7e8e691b-25d5-4d9e-b01e-1b4455270abf', name: 'Rosalind', role: 'Chief of Staff', status: 'idle', budgetRemaining: 180, budgetCap: 200 },
@@ -16,6 +17,14 @@ const MOCK_AGENTS: AgentSummary[] = [
 ]
 
 export function Conversations() {
+  return (
+    <PraxioOnboardingGate>
+      <ConversationsApp />
+    </PraxioOnboardingGate>
+  )
+}
+
+function ConversationsApp() {
   const [selectedId, setSelectedId] = useState<string | null>('7e8e691b-25d5-4d9e-b01e-1b4455270abf')
   const selectedAgent = MOCK_AGENTS.find((a) => a.id === selectedId) ?? null
   const { ws, send } = useWebSocket('/ws')

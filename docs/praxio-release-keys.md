@@ -43,8 +43,9 @@ disk on any human's machine after initial generation.
 
 ## Who has access
 
-Per [AZU-1835 deliverable 6](/AZU/issues/AZU-1835) (Phase C rotation
-deferred per Rosalind's note):
+Per [AZU-1838](/AZU/issues/AZU-1838) deliverable 5 (Phase C rotation
+deferred per Rosalind's note — AZU-1835 was superseded by [AZU-1850](/AZU/issues/AZU-1850)
+when distribution moved from AWS S3/CloudFront to DigitalOcean Spaces + DO CDN):
 
 | Principal             | Access kind                              | Notes                                                                                                      |
 | --------------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
@@ -77,8 +78,17 @@ gh secret set PRAXIO_MINISIGN_KEY_PASSWORD \
   --repo Azul-Digital-Partners/praxio
 
 # Publish the public half (anyone can have it — this is the verify side)
-aws s3 cp minisign.pub s3://praxio-downloads/minisign.pub \
-  --content-type text/plain --cache-control "max-age=86400"
+# Distribution bucket lives on DigitalOcean Spaces per AZU-1850; doctl is
+# already authenticated on the agent fleet, so use s3cmd / aws CLI with the
+# DO Spaces endpoint or the doctl spaces command — see AZU-1850 for the
+# canonical upload recipe once the bucket is provisioned.
+s3cmd put minisign.pub \
+  s3://praxio-downloads/minisign.pub \
+  --host=nyc3.digitaloceanspaces.com \
+  --host-bucket="%(bucket)s.nyc3.digitaloceanspaces.com" \
+  --mime-type=text/plain \
+  --add-header="Cache-Control: max-age=86400" \
+  --acl-public
 
 # Shred local copies once you have confirmed 1Password + GH secret are both populated
 shred -u minisign.key  # or: srm minisign.key on macOS via brew install srm
@@ -106,7 +116,8 @@ pipeline.
 ## Rotation
 
 Deferred to Phase C per Rosalind's note on
-[AZU-1835](/AZU/issues/AZU-1835). When we do it:
+[AZU-1838](/AZU/issues/AZU-1838) (originally tracked on the cancelled
+[AZU-1835](/AZU/issues/AZU-1835)). When we do it:
 
 1. Generate a new key pair.
 2. Publish the new public key alongside the old one for a transition window.
@@ -125,6 +136,8 @@ Deferred to Phase C per Rosalind's note on
 
 ## Related
 
-- [AZU-1835](/AZU/issues/AZU-1835) — original deliverable
+- [AZU-1838](/AZU/issues/AZU-1838) — current deliverable (SBOM + minisign-signed manifest)
+- [AZU-1835](/AZU/issues/AZU-1835) — original deliverable (cancelled, superseded by AZU-1850)
+- [AZU-1850](/AZU/issues/AZU-1850) — DO Spaces distribution bucket that hosts `minisign.pub`
 - [AZU-1832 plan §5](/AZU/issues/AZU-1832#document-plan) — provenance model
 - [AZU-716](/AZU/issues/AZU-716) — Phase C boundary (rotation lives here)

@@ -4,10 +4,11 @@
 # workflow_dispatch (with an optional `dry_run` toggle that builds + signs
 # + notarizes but does NOT stage artifacts for distribution).
 #
-# Phase B-1 (AZU-1833): build only. Distribution to S3/CloudFront is gated
-# to Phase B-3. SBOM + signed release manifest is Phase B-6. Auto-update
-# wiring is Phase C. This workflow stages artifacts as GH Actions artifacts;
-# Phase B-3 will add the upload step that consumes them.
+# Phase B-1 (AZU-1833): build only. Distribution to downloads.praxio.app
+# (DO Spaces + DO CDN per AZU-1850, replacing the cancelled AZU-1835 S3/
+# CloudFront variant) is bolted on once the upload step lands. Phase B-6
+# (AZU-1838) adds SBOM + minisign-signed release manifest below — see the
+# block after the smoke step. Auto-update wiring is Phase C.
 #
 # Secrets (provisioned in GitHub Actions environment `praxio-release`):
 #   APPLE_CERT_P12_BASE64        Developer ID Application .p12, base64-encoded
@@ -23,6 +24,10 @@
 #   CSC_KEY_PASSWORD             Same as APPLE_CERT_PASSWORD; kept distinct
 #                                so electron-builder picks it up under its
 #                                canonical env var name.
+#   PRAXIO_MINISIGN_KEY_BASE64   Base64 of the minisign secret key file
+#                                (~/.minisign/minisign.key). See
+#                                docs/praxio-release-keys.md for custody.
+#   PRAXIO_MINISIGN_KEY_PASSWORD Passphrase for the encrypted minisign key.
 #
 # Required reviewers on the `praxio-release` GitHub environment on first
 # use of new secret material: Steven and/or Rosalind.
@@ -195,6 +200,125 @@ jobs:
           set -euo pipefail
           ./scripts/praxio-release-smoke.sh dist-electron
 
+      # ------------------------------------------------------------------
+      # Phase B-6 (AZU-1838): provenance — SBOM + signed release manifest.
+      # The signing step requires the praxio-release env secrets
+      # PRAXIO_MINISIGN_KEY_BASE64 + PRAXIO_MINISIGN_KEY_PASSWORD; see
+      # docs/praxio-release-keys.md for custody and one-time setup.
+      # ------------------------------------------------------------------
+
+      - name: Resolve Praxio version
+        id: praxio_version
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./electron/package.json').version")
+          if [[ -z "$version" ]]; then
+            echo "::error::electron/package.json has no .version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          if ! command -v minisign >/dev/null 2>&1; then
+            brew install minisign
+          fi
+          minisign -v
+
+      - name: Generate CycloneDX SBOM (electron production install tree)
+        env:
+          PRAXIO_VERSION: ${{ steps.praxio_version.outputs.version }}
+        run: |
+          set -euo pipefail
+          out="dist-electron/sbom-${PRAXIO_VERSION}.cdx.json"
+          # Run cyclonedx-npm against the electron workspace — that is the
+          # package.json + node_modules tree electron-builder copies into
+          # the .app at pack time, so the SBOM matches what actually ships.
+          # --output-format JSON gives us CycloneDX JSON; --spec-version 1.5
+          # pins the spec for downstream verifiers.
+          pnpm dlx @cyclonedx/cyclonedx-npm@^2.0.0 \
+            --output-format JSON \
+            --spec-version 1.5 \
+            --output-file "$out" \
+            --package-lock-only \
+            electron/package.json
+          ls -la "$out"
+          echo "sbom=$out" >> "$GITHUB_ENV"
+
+      - name: Build release manifest (per-DMG SHA-512 + provenance)
+        env:
+          PRAXIO_VERSION: ${{ steps.praxio_version.outputs.version }}
+          PRAXIO_PNPM_VERSION: "9.15.4"
+          PRAXIO_NODE_VERSION: "24"
+        run: |
+          set -euo pipefail
+          # Capture the installed Electron version (the runtime that landed
+          # in node_modules), not the range declared in package.json.
+          electron_version=$(pnpm --filter @paperclipai/electron exec node -p "require('electron/package.json').version" 2>/dev/null || true)
+          if [[ -n "$electron_version" ]]; then
+            export PRAXIO_ELECTRON_VERSION="$electron_version"
+          fi
+          out="dist-electron/praxio-release-manifest-${PRAXIO_VERSION}.json"
+          node scripts/praxio-build-release-manifest.mjs \
+            --dist-dir dist-electron \
+            --sbom "$sbom" \
+            --out "$out"
+          echo "manifest=$out" >> "$GITHUB_ENV"
+          ls -la "$out"
+
+      - name: Decode minisign signing key
+        id: decode_minisign
+        run: |
+          set -euo pipefail
+          umask 077
+          key_path="$RUNNER_TEMP/praxio-minisign.key"
+          if [[ -z "${{ secrets.PRAXIO_MINISIGN_KEY_BASE64 }}" ]]; then
+            echo "::error::PRAXIO_MINISIGN_KEY_BASE64 secret is not set in the praxio-release environment."
+            echo "::error::See docs/praxio-release-keys.md for one-time key generation + upload."
+            exit 1
+          fi
+          echo "${{ secrets.PRAXIO_MINISIGN_KEY_BASE64 }}" | base64 -d > "$key_path"
+          chmod 600 "$key_path"
+          if [[ ! -s "$key_path" ]]; then
+            echo "::error::decoded minisign key is empty"
+            exit 1
+          fi
+          echo "key_path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Sign release manifest with minisign
+        env:
+          MINISIGN_PASSWORD: ${{ secrets.PRAXIO_MINISIGN_KEY_PASSWORD }}
+          MINISIGN_KEY: ${{ steps.decode_minisign.outputs.key_path }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$manifest" || ! -f "$manifest" ]]; then
+            echo "::error::release manifest missing at \$manifest=$manifest"
+            exit 1
+          fi
+          # minisign reads the passphrase from stdin in non-interactive mode.
+          # `-S` signs; the detached signature lands at <manifest>.minisig.
+          printf '%s\n' "$MINISIGN_PASSWORD" | minisign \
+            -S \
+            -s "$MINISIGN_KEY" \
+            -m "$manifest" \
+            -t "Praxio release manifest $(basename "$manifest")"
+          sig="$manifest.minisig"
+          if [[ ! -s "$sig" ]]; then
+            echo "::error::minisign produced no signature at $sig"
+            exit 1
+          fi
+          ls -la "$sig"
+
+      - name: Cleanup minisign key
+        if: always()
+        run: |
+          set +e
+          if [[ -n "${RUNNER_TEMP:-}" ]]; then
+            rm -f "$RUNNER_TEMP/praxio-minisign.key"
+          fi
+          true
+
       - name: Stage artifacts for distribution (Phase B-3 will consume)
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_run == false }}
         run: |
@@ -208,12 +332,15 @@ jobs:
             --include "latest-mac*.yml" \
             --include "builder-debug.yml" \
             --include "builder-effective-config.yaml" \
+            --include "sbom-*.cdx.json" \
+            --include "praxio-release-manifest-*.json" \
+            --include "praxio-release-manifest-*.json.minisig" \
             --exclude "*" \
             dist-electron/ "$stage_dir/"
           ls -la "$stage_dir"
           echo "Staged $(find "$stage_dir" -type f | wc -l) artifact(s) for Phase B-3 upload."
 
-      - name: Upload DMGs + blockmaps + latest-mac.yml
+      - name: Upload DMGs + blockmaps + latest-mac.yml + provenance
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -223,6 +350,9 @@ jobs:
             dist-electron/*.blockmap
             dist-electron/latest-mac.yml
             dist-electron/latest-mac*.yml
+            dist-electron/sbom-*.cdx.json
+            dist-electron/praxio-release-manifest-*.json
+            dist-electron/praxio-release-manifest-*.json.minisig
           if-no-files-found: error
           retention-days: 14
 

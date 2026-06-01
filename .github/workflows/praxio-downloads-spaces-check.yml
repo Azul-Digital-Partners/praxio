@@ -1,0 +1,160 @@
+name: Praxio downloads Spaces capability check
+
+# Verifies that the praxio-release GitHub Actions environment can use the DO
+# Spaces access key to:
+#   - PUT under s3://${DO_SPACES_BUCKET}/stable/  (positive — must succeed)
+#   - PUT under /beta/  (negative — workflow asserts that we don't write here;
+#     see "Negative test scope" below)
+#   - GET the uploaded probe via the DO CDN at https://downloads.praxio.app/...
+#
+# Replaces .github/workflows/praxio-downloads-oidc-check.yml. The AWS OIDC
+# route was retired per CEO ruling on AZU-1846 (DO Spaces + DO CDN instead of
+# AWS S3 + CloudFront). Acceptance criteria translated from AZU-1835 / AZU-1850.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# Negative test scope (important — different from the AWS version)
+# ─────────────────────────────────────────────────────────────────────────────
+# The AWS workflow asserted AccessDenied at the IAM layer when writing under
+# /beta/ or /. DigitalOcean Spaces access keys cannot be scoped by prefix at
+# the key level, so the equivalent server-side enforcement does not exist.
+#
+# The substitute controls are:
+#   1. The Spaces key lives only in the `praxio-release` GitHub environment,
+#      which has required-reviewer protection. A human must approve before any
+#      release workflow can use the secret at all.
+#   2. The negative step below is a WORKFLOW-LEVEL guard. It deliberately does
+#      NOT attempt the upload (because DO would accept it). Instead it asserts
+#      that no positive-step code path writes outside /stable/. This catches
+#      accidental code changes to this workflow, not malicious actors with the
+#      key.
+#
+# This trade-off is documented in infra/praxio-downloads/README.md.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_probe:
+        description: Leave the probe object behind so /stable/probe-latest.txt stays fresh.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  spaces-check:
+    name: Spaces capability check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: praxio-release
+
+    env:
+      AWS_ACCESS_KEY_ID:     ${{ secrets.DO_SPACES_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.DO_SPACES_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION:    ${{ vars.DO_SPACES_REGION }}
+
+      DO_SPACES_REGION:   ${{ vars.DO_SPACES_REGION }}
+      DO_SPACES_BUCKET:   ${{ vars.DO_SPACES_BUCKET }}
+      DO_CDN_ENDPOINT:    ${{ vars.DO_CDN_ENDPOINT }}
+      DOMAIN:             downloads.praxio.app
+      SPACES_ENDPOINT_URL: https://${{ vars.DO_SPACES_REGION }}.digitaloceanspaces.com
+
+    steps:
+      - name: Sanity — show Spaces endpoint
+        run: |
+          echo "endpoint: $SPACES_ENDPOINT_URL"
+          echo "bucket:   $DO_SPACES_BUCKET"
+          echo "cdn:      $DO_CDN_ENDPOINT"
+          echo "domain:   $DOMAIN"
+          # Don't print credentials. Just verify the bucket head succeeds —
+          # this confirms the key is valid and scoped to the right Space.
+          aws --endpoint-url "$SPACES_ENDPOINT_URL" s3api head-bucket \
+            --bucket "$DO_SPACES_BUCKET"
+
+      - name: Positive — PutObject under /stable/ succeeds
+        id: positive
+        run: |
+          set -euo pipefail
+          key="stable/probe-${{ github.run_id }}.txt"
+          body="praxio downloads probe — run=${{ github.run_id }} sha=${{ github.sha }} at=$(date -u +%FT%TZ)"
+          printf '%s\n' "$body" > /tmp/probe.txt
+          aws --endpoint-url "$SPACES_ENDPOINT_URL" s3 cp \
+            /tmp/probe.txt "s3://${DO_SPACES_BUCKET}/${key}" \
+            --acl private \
+            --content-type text/plain \
+            --cache-control "no-store"
+          echo "probe_key=${key}" >> "$GITHUB_OUTPUT"
+          echo "uploaded s3://${DO_SPACES_BUCKET}/${key}"
+
+      - name: Positive — also refresh /stable/probe-latest.txt
+        if: ${{ inputs.keep_probe }}
+        run: |
+          set -euo pipefail
+          aws --endpoint-url "$SPACES_ENDPOINT_URL" s3 cp \
+            /tmp/probe.txt "s3://${DO_SPACES_BUCKET}/stable/probe-latest.txt" \
+            --acl private \
+            --content-type text/plain \
+            --cache-control "no-store"
+
+      - name: Negative — assert workflow never writes outside /stable/
+        # Workflow-level guard. DO Spaces keys cannot be prefix-scoped, so we
+        # cannot test "the key is forbidden from writing to /beta/" — DO would
+        # accept it. Instead, scan the workflow source to make sure no s3 cp /
+        # put-object step targets a key that doesn't start with stable/.
+        run: |
+          set -euo pipefail
+          wf=".github/workflows/praxio-downloads-spaces-check.yml"
+          if [ ! -f "$wf" ]; then
+            # When triggered from a feature branch the path is the same.
+            wf="$(find .github/workflows -name 'praxio-downloads-spaces-check.yml' | head -n1)"
+          fi
+          bad="$(grep -nE 's3 cp|s3api put-object|s3 sync' "$wf" \
+                  | grep -vE '/stable/|/tmp/|--include|--exclude' \
+                  || true)"
+          if [ -n "$bad" ]; then
+            echo "FAIL: workflow contains a write step that may target a non-/stable/ key:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: workflow only writes under /stable/"
+
+      - name: Purge probe path on the CDN edge
+        if: ${{ env.DO_CDN_ENDPOINT != '' }}
+        run: |
+          set -euo pipefail
+          # DO purge requires a DO API token, not the Spaces key. We accept
+          # the slower edge expiry path here rather than carrying yet another
+          # secret. Cache-Control: no-store on the probe object means the edge
+          # shouldn't store it long. If you want explicit purge, wire a
+          # DIGITALOCEAN_ACCESS_TOKEN secret and call:
+          #   curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+          #     "https://api.digitalocean.com/v2/cdn/endpoints/${DO_CDN_ID}/cache" \
+          #     --data '{"files":["/stable/probe-...","/stable/probe-latest.txt"]}'
+          echo "skipping explicit purge (cache-control: no-store on probe)"
+
+      - name: Verify CDN serves the probe
+        run: |
+          set -euo pipefail
+          url="https://${DOMAIN}/${{ steps.positive.outputs.probe_key }}"
+          # DO CDN propagation is usually fast (<30s), but allow some slack.
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsSI "$url" >/dev/null; then
+              echo "OK: ${url} served by DO CDN"
+              curl -fsSI "$url"
+              exit 0
+            fi
+            echo "attempt ${attempt}: not yet, sleeping 10s"
+            sleep 10
+          done
+          echo "FAIL: ${url} did not respond 2xx within 60s"
+          curl -fsSI "$url" || true
+          exit 1
+
+      - name: Cleanup — remove the per-run probe (keeps probe-latest.txt)
+        if: always()
+        run: |
+          set +e
+          aws --endpoint-url "$SPACES_ENDPOINT_URL" s3 rm \
+            "s3://${DO_SPACES_BUCKET}/${{ steps.positive.outputs.probe_key }}"
+          exit 0

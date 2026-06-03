@@ -110,7 +110,11 @@ export function PraxioOnboardingWizard(props: PraxioOnboardingWizardProps) {
           </Button>
           <Button
             data-testid="praxio-next"
-            disabled={!canAdvance}
+            // Step 7 is a passive review screen — its completion happens by
+            // clicking Start, so don't gate the button on isStepComplete
+            // (which only flips true after `complete()` fires). For earlier
+            // steps, `canAdvance` is the correct gate.
+            disabled={!isLast && !canAdvance}
             onClick={handleNext}
           >
             {isLast ? 'Start' : 'Continue'}

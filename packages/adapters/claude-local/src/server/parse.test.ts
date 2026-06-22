@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  detectClaudeLoginRequired,
   extractClaudeRetryNotBefore,
   isClaudeTransientUpstreamError,
 } from "./parse.js";
@@ -67,6 +68,37 @@ describe("isClaudeTransientUpstreamError", () => {
     expect(
       isClaudeTransientUpstreamError({
         stderr: "Please log in. Run `claude login` first.",
+      }),
+    ).toBe(false);
+  });
+
+  it("classifies '401 Invalid authentication credentials' as transient (mid-refresh token blip)", () => {
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Error: 401 Invalid authentication credentials",
+      }),
+    ).toBe(true);
+    // Bare 401 in OAuth/token context also classifies as transient.
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "HTTP 401 returned while refreshing OAuth token",
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps genuine logout precedence over the new 401-transient match", () => {
+    // detectClaudeLoginRequired still wins for explicit 'please log in' wording.
+    expect(
+      detectClaudeLoginRequired({
+        parsed: null,
+        stdout: "",
+        stderr: "Please run claude login",
+      }).requiresLogin,
+    ).toBe(true);
+    // And the transient classifier explicitly bows out when login is required.
+    expect(
+      isClaudeTransientUpstreamError({
+        stderr: "Please run claude login. Error: 401 Invalid authentication credentials",
       }),
     ).toBe(false);
   });

@@ -40,6 +40,8 @@ import {
   issueWorkProducts,
   projects,
   projectWorkspaces,
+  routines,
+  routineTriggers,
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
@@ -133,6 +135,7 @@ import {
   decideSuccessfulRunHandoff,
   findExistingFinishSuccessfulRunHandoffWake,
   findExistingRunLivenessContinuationWake,
+  LINKED_ACTIVE_ROUTINE_STALE_WINDOW_MS,
   SUCCESSFUL_RUN_HANDOFF_REQUIRED_NOTICE_BODY,
   readContinuationAttempt,
 } from "./recovery/index.js";
@@ -4050,6 +4053,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       pendingApproval,
       explicitBlocker,
       openRecoveryIssue,
+      linkedActiveRoutine,
+      openChildIssue,
       existingWake,
       budgetBlock,
       pauseHold,
@@ -4163,6 +4168,41 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .limit(1)
           .then((rows) => rows[0] ?? null)
         : Promise.resolve(null),
+      issue
+        ? db
+          .select({ id: routines.id })
+          .from(routines)
+          .innerJoin(routineTriggers, eq(routineTriggers.routineId, routines.id))
+          .where(
+            and(
+              eq(routines.companyId, issue.companyId),
+              eq(routines.parentIssueId, issue.id),
+              eq(routines.assigneeAgentId, run.agentId),
+              eq(routines.status, "active"),
+              eq(routineTriggers.enabled, true),
+              sql`${routineTriggers.nextRunAt} is not null`,
+              sql`${routineTriggers.nextRunAt} > now()`,
+              sql`${routineTriggers.nextRunAt} < now() + (${LINKED_ACTIVE_ROUTINE_STALE_WINDOW_MS} || ' milliseconds')::interval`,
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
+      issue
+        ? db
+          .select({ id: issues.id })
+          .from(issues)
+          .where(
+            and(
+              eq(issues.companyId, issue.companyId),
+              eq(issues.parentId, issue.id),
+              notInArray(issues.status, ["done", "cancelled"]),
+              isNull(issues.hiddenAt),
+            ),
+          )
+          .limit(1)
+          .then((rows) => rows[0] ?? null)
+        : Promise.resolve(null),
       idempotencyKey
         ? findExistingFinishSuccessfulRunHandoffWake(db, {
           companyId: run.companyId,
@@ -4192,6 +4232,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       hasPendingInteractionOrApproval: Boolean(pendingInteraction || pendingApproval),
       hasExplicitBlockerPath: Boolean(explicitBlocker),
       hasOpenRecoveryIssue: Boolean(openRecoveryIssue),
+      hasLinkedActiveRoutine: Boolean(linkedActiveRoutine),
+      hasOpenChildIssue: Boolean(openChildIssue),
       hasPauseHold: Boolean(pauseHold),
       budgetBlocked: Boolean(budgetBlock),
       idempotentWakeExists: Boolean(existingWake),

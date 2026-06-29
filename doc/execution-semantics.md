@@ -360,6 +360,20 @@ Operators should prefer `snooze` for known time-bounded quiet periods. `continue
 
 The board can record watchdog decisions. The assigned owner of an issue-backed watchdog evaluation can also record them. Other agents cannot.
 
+### Auto-Recovery After Repeated Watchdog Reviews
+
+When the same run id has accumulated `ACTIVE_RUN_OUTPUT_AUTO_RECOVERY_THRESHOLD_COUNT` (default 3) prior watchdog review decisions (`continue` or `dismissed_false_positive`), the scan stops spawning new `stale_active_run_evaluation` issues for that run. Instead, the recovery service executes a one-shot auto-recovery:
+
+- resolve the source issue's manager via the standard `reports-to` chain (source assignee → running agent → CTO/CEO fallback) used for stale-run owner resolution
+- reassign the source issue to that manager and set it to `blocked` with the watchdog cause and a consolidated reference to the prior review issue identifiers
+- post one consolidated escalation comment on the source issue (replacing what would otherwise be the Nth duplicate review) and wake the manager
+- record an `auto_recovered` watchdog decision with a 30-day default snooze so the periodic scan does not re-fire on the same run id while the manager triages
+- emit a `heartbeat.output_stale_auto_recovered` run-event for audit
+
+The auto-recovery path does **not** terminate the live process — there is no public run-cancel API at the time of this contract. Termination remains a manager decision recorded against the source issue. The 30-day snooze is a backstop, not the resolution; the manager is expected to either continue the run with new evidence, cancel it, or escalate further.
+
+`auto_recovered` is a recovery-service-recorded decision, not an operator-recordable one. It participates in `latestActiveOutputQuietUntilDecision` the same way `snooze` does for the purpose of suppressing further scan-created review work.
+
 ## 11. Auto-Recover vs Explicit Recovery vs Human Escalation
 
 Paperclip uses three different recovery outcomes, depending on how much it can safely infer.

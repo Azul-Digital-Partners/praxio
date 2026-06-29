@@ -64,6 +64,12 @@ const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "ti
 export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS = 30 * 60 * 1000;
+// Routine-execution runs frequently spend long stretches without stdout
+// (long-running processors that produce output via API comments, not the
+// process pipes the watchdog tracks). Use a higher suspicion threshold so
+// the watchdog does not page on healthy long-running routine fires.
+// Critical threshold stays shared across origins.
+export const ROUTINE_EXECUTION_OUTPUT_SUSPICION_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 const ACTIVE_RUN_OUTPUT_EVIDENCE_TAIL_BYTES = 8 * 1024;
 const STRANDED_ISSUE_RECOVERY_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.strandedIssueRecovery;
 const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiveRunEvaluation;
@@ -184,6 +190,12 @@ function isExhaustedSuccessfulRunHandoff(latestRun: LatestIssueRun) {
 function issueIdFromRunContext(contextSnapshot: unknown) {
   const context = parseObject(contextSnapshot);
   return readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+}
+
+export function originSuspicionThresholdMs(originKind: string | null | undefined) {
+  return originKind === "routine_execution"
+    ? ROUTINE_EXECUTION_OUTPUT_SUSPICION_THRESHOLD_MS
+    : ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS;
 }
 
 function issueIdFromWakePayload(payload: unknown) {
@@ -1038,8 +1050,17 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       prefix,
       now: input.now,
     });
-    const level = (evidence.silenceAgeMs ?? 0) >= ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS ? "critical" : "suspicious";
+    const silenceAgeMs = evidence.silenceAgeMs ?? 0;
+    const suspicionThresholdMs = originSuspicionThresholdMs(sourceIssue?.originKind ?? null);
+    const level = silenceAgeMs >= ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS ? "critical" : "suspicious";
     const existing = await findOpenStaleRunEvaluation(input.run.companyId, input.run.id);
+    // Honour the per-origin suspicion threshold: do not open a new suspicious
+    // evaluation before the origin-specific threshold elapses. We still allow
+    // the critical tier to escalate at the shared 4h mark for any origin, and
+    // we never suppress updates to an already-open evaluation.
+    if (!existing && level === "suspicious" && silenceAgeMs < suspicionThresholdMs) {
+      return { kind: "skipped" as const };
+    }
     if (existing) {
       if (level === "critical" && existing.priority !== "high") {
         await issuesSvc.update(existing.id, {

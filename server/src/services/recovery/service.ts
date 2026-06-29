@@ -25,6 +25,7 @@ import {
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { forbidden, notFound } from "../../errors.js";
+import { isProcessAlive, isProcessGroupAlive } from "../local-service-supervisor.js";
 import { logger } from "../../middleware/logger.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import { redactSensitiveText } from "../../redaction.js";
@@ -1153,6 +1154,79 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return { kind: "created" as const, evaluationIssueId: evaluation.id };
   }
 
+  // True when the adapter that owned this run has clearly exited:
+  //   - we no longer hold an in-memory process handle for it, AND
+  //   - at least one of pid/processGroupId was recorded (positive evidence
+  //     that a real process was spawned for this run), AND
+  //   - every recorded pid/processGroupId is no longer alive on this host.
+  // Conservative by design: absence of a recorded pid is *not* evidence of
+  // exit — older runs and synthetic test fixtures may not have populated
+  // processPid/processGroupId, and we must not silently bury those.
+  function isAdapterProcessGone(
+    run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "processPid" | "processGroupId">,
+  ) {
+    if (runningProcesses.has(run.id)) return false;
+    const pidRecorded = typeof run.processPid === "number";
+    const groupRecorded = typeof run.processGroupId === "number";
+    if (!pidRecorded && !groupRecorded) return false;
+    if (pidRecorded && isProcessAlive(run.processPid)) return false;
+    if (groupRecorded && isProcessGroupAlive(run.processGroupId)) return false;
+    return true;
+  }
+
+  // The output sequence is incremented once per real output chunk, but lifecycle
+  // events such as "run started" and "adapter invocation" are recorded as run
+  // events without bumping the sequence. A run that has produced at most one
+  // sequenced output and whose adapter has already exited matches the normal
+  // invoke-and-exit completion shape (e.g. `claude_local`) — not a stuck run.
+  function isCleanlyExitedInvokeAndExitRun(
+    run: Pick<typeof heartbeatRuns.$inferSelect, "id" | "processPid" | "processGroupId" | "lastOutputSeq" | "status">,
+  ) {
+    if (run.status !== "running") return false;
+    if ((run.lastOutputSeq ?? 0) > 1) return false;
+    return isAdapterProcessGone(run);
+  }
+
+  // Transition a cleanly-exited invoke-and-exit run from "running" to a
+  // terminal status so the dedup/eval pipeline stops repeatedly chewing on it.
+  // Conditional update on status="running" keeps this safe under races.
+  async function finalizeCleanlyExitedInvokeAndExitRun(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    now: Date;
+  }) {
+    const reason = "Adapter exited cleanly without recording a terminal status; silent-run watchdog suppression";
+    const updated = await db
+      .update(heartbeatRuns)
+      .set({
+        status: "failed",
+        errorCode: "adapter_exited_without_terminal_status",
+        error: input.run.error ?? reason,
+        finishedAt: input.run.finishedAt ?? input.now,
+        updatedAt: input.now,
+      })
+      .where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.status, "running")))
+      .returning({ id: heartbeatRuns.id });
+    if (updated.length === 0) return false;
+    await logActivity(db, {
+      companyId: input.run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: input.run.agentId,
+      runId: input.run.id,
+      action: "heartbeat.output_stale_suppressed_clean_exit",
+      entityType: "heartbeat_run",
+      entityId: input.run.id,
+      details: {
+        source: "recovery.scan_silent_active_runs",
+        reason: "adapter_exited_without_terminal_status",
+        lastOutputSeq: input.run.lastOutputSeq ?? 0,
+        processPid: input.run.processPid ?? null,
+        processGroupId: input.run.processGroupId ?? null,
+      },
+    });
+    return true;
+  }
+
   async function scanSilentActiveRuns(opts?: { now?: Date; companyId?: string }) {
     const now = opts?.now ?? new Date();
     const suspicionBefore = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS);
@@ -1176,12 +1250,21 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       snoozed: 0,
       skipped: 0,
+      cleanExitSuppressed: 0,
       evaluationIssueIds: [] as string[],
     };
 
     for (const run of candidates) {
       if (await latestActiveOutputQuietUntilDecision(run.companyId, run.id, now)) {
         result.snoozed += 1;
+        continue;
+      }
+      if (isCleanlyExitedInvokeAndExitRun(run)) {
+        // The adapter is gone and produced at most the synthetic startup output.
+        // This is normal invoke-and-exit completion (see AZU-2907); do not open
+        // a review issue, and transition the zombie row to a terminal status.
+        await finalizeCleanlyExitedInvokeAndExitRun({ run, now });
+        result.cleanExitSuppressed += 1;
         continue;
       }
       const outcome = await createOrUpdateStaleRunEvaluation({ run, now });

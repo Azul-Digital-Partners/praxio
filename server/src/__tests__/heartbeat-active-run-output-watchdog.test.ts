@@ -496,6 +496,106 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     ).rejects.toMatchObject({ status: 403 });
   });
 
+  it("suppresses evaluation and finalizes runs whose adapter exited cleanly with output sequence <= 1", async () => {
+    // Reproduces AZU-2886 / run 48c78a92: a `claude_local` invoke-and-exit run
+    // produced its single startup output and the adapter exited cleanly, but
+    // the run row remained `running` in the DB. The previous behavior opened a
+    // false-positive review issue on every silent-run scan (AZU-2907).
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, coderId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    await db
+      .update(agents)
+      .set({ adapterType: "claude_local" })
+      .where(eq(agents.id, coderId));
+    const startedAt = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS - 60_000);
+    await db
+      .update(heartbeatRuns)
+      .set({
+        // Single startup output event then silence — invoke-and-exit shape.
+        lastOutputSeq: 1,
+        lastOutputAt: startedAt,
+        lastOutputStream: "stdout",
+        // Recorded pid is well above the OS max, so the liveness probe returns
+        // ESRCH — positive evidence the adapter process is gone. No in-memory
+        // handle is held for this run (it was never added to runningProcesses).
+        processPid: 999_999_999,
+        processGroupId: null,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const scan = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(scan).toMatchObject({
+      scanned: 1,
+      created: 0,
+      existing: 0,
+      escalated: 0,
+      cleanExitSuppressed: 1,
+    });
+    expect(scan.evaluationIssueIds).toHaveLength(0);
+
+    const evaluations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(evaluations).toHaveLength(0);
+
+    const [updated] = await db
+      .select({
+        status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode,
+        finishedAt: heartbeatRuns.finishedAt,
+      })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(updated?.status).toBe("failed");
+    expect(updated?.errorCode).toBe("adapter_exited_without_terminal_status");
+    expect(updated?.finishedAt).not.toBeNull();
+
+    // A second scan must be a no-op for this run (it is no longer "running").
+    const second = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(second).toMatchObject({ scanned: 0, created: 0, cleanExitSuppressed: 0 });
+  });
+
+  it("still creates evaluations when seq <= 1 but the adapter pid is still alive", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, coderId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    await db
+      .update(agents)
+      .set({ adapterType: "claude_local" })
+      .where(eq(agents.id, coderId));
+    await db
+      .update(heartbeatRuns)
+      .set({
+        lastOutputSeq: 1,
+        lastOutputStream: "stdout",
+        // Pin to our own pid so the liveness probe sees a live process.
+        processPid: process.pid,
+        processGroupId: null,
+      })
+      .where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+
+    const scan = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(scan.cleanExitSuppressed).toBe(0);
+    expect(scan.created).toBe(1);
+
+    const [updated] = await db
+      .select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(updated?.status).toBe("running");
+    expect(updated?.errorCode).toBeNull();
+  });
+
   it("validates createdByRunId before storing watchdog decisions", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const { companyId, managerId, runId } = await seedRunningRun({

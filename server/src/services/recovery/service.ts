@@ -64,6 +64,9 @@ const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "ti
 export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS = 30 * 60 * 1000;
+export const AUTO_CONTINUE_ON_EVALUATION_CLOSE_RECENCY_WINDOW_MS = 5 * 60 * 1000;
+const AUTO_CONTINUE_ON_EVALUATION_CLOSE_REASON =
+  "Implicit continue: stale-active-run evaluation issue closed done";
 const ACTIVE_RUN_OUTPUT_EVIDENCE_TAIL_BYTES = 8 * 1024;
 const STRANDED_ISSUE_RECOVERY_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.strandedIssueRecovery;
 const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiveRunEvaluation;
@@ -1330,6 +1333,104 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     });
 
     return row;
+  }
+
+  async function autoRecordContinueOnStaleEvaluationClose(input: {
+    evaluationIssueId: string;
+    actor:
+      | { type: "agent"; agentId: string }
+      | { type: "user"; userId: string }
+      | { type: "system" };
+    closedByRunId?: string | null;
+    now?: Date;
+    recencyWindowMs?: number;
+  }): Promise<{ recorded: boolean; reason: string; decisionId?: string }> {
+    const [evaluation] = await db
+      .select({
+        id: issues.id,
+        companyId: issues.companyId,
+        originKind: issues.originKind,
+        originId: issues.originId,
+        status: issues.status,
+        hiddenAt: issues.hiddenAt,
+      })
+      .from(issues)
+      .where(eq(issues.id, input.evaluationIssueId))
+      .limit(1);
+    if (!evaluation) return { recorded: false, reason: "issue_not_found" };
+    if (evaluation.originKind !== STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND) {
+      return { recorded: false, reason: "wrong_origin_kind" };
+    }
+    if (!evaluation.originId) return { recorded: false, reason: "missing_origin_id" };
+    if (evaluation.status !== "done") return { recorded: false, reason: "not_closed_done" };
+    if (evaluation.hiddenAt !== null) return { recorded: false, reason: "issue_hidden" };
+
+    const now = input.now ?? new Date();
+    const runId = evaluation.originId;
+    const companyId = evaluation.companyId;
+    const recencyWindowMs = input.recencyWindowMs ?? AUTO_CONTINUE_ON_EVALUATION_CLOSE_RECENCY_WINDOW_MS;
+    const recentBefore = new Date(now.getTime() - recencyWindowMs);
+
+    const [recent] = await db
+      .select({ id: heartbeatRunWatchdogDecisions.id })
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.companyId, companyId),
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.evaluationIssueId, input.evaluationIssueId),
+          gt(heartbeatRunWatchdogDecisions.createdAt, recentBefore),
+        ),
+      )
+      .limit(1);
+    if (recent) return { recorded: false, reason: "recent_decision_exists" };
+
+    const effectiveSnoozedUntil = new Date(now.getTime() + ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS);
+    const createdByAgentId = input.actor.type === "agent" ? input.actor.agentId : null;
+    const createdByUserId = input.actor.type === "user" ? input.actor.userId : null;
+    const createdByRunId = input.closedByRunId ?? null;
+    const reason = AUTO_CONTINUE_ON_EVALUATION_CLOSE_REASON;
+
+    const [row] = await db
+      .insert(heartbeatRunWatchdogDecisions)
+      .values({
+        companyId,
+        runId,
+        evaluationIssueId: input.evaluationIssueId,
+        decision: "continue",
+        snoozedUntil: effectiveSnoozedUntil,
+        reason,
+        createdByAgentId,
+        createdByUserId,
+        createdByRunId,
+      })
+      .returning({ id: heartbeatRunWatchdogDecisions.id });
+
+    await logActivity(db, {
+      companyId,
+      actorType:
+        input.actor.type === "agent" ? "agent" : input.actor.type === "user" ? "user" : "system",
+      actorId:
+        input.actor.type === "agent"
+          ? input.actor.agentId
+          : input.actor.type === "user"
+            ? input.actor.userId
+            : "system",
+      agentId: createdByAgentId,
+      runId,
+      action: "heartbeat.watchdog_decision_recorded",
+      entityType: "heartbeat_run",
+      entityId: runId,
+      details: {
+        source: "recovery.auto_continue_on_evaluation_close",
+        decision: "continue",
+        evaluationIssueId: input.evaluationIssueId,
+        snoozedUntil: effectiveSnoozedUntil.toISOString(),
+        reason,
+      },
+    });
+
+    return { recorded: true, reason: "recorded", decisionId: row?.id };
   }
 
   async function findOpenStrandedIssueRecoveryIssue(companyId: string, sourceIssueId: string) {
@@ -3044,6 +3145,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     escalateStrandedRecoveryIssueInPlace,
     escalateStrandedAssignedIssue,
     recordWatchdogDecision,
+    autoRecordContinueOnStaleEvaluationClose,
     scanSilentActiveRuns,
     reconcileStrandedAssignedIssues,
     buildIssueGraphLivenessAutoRecoveryPreview,

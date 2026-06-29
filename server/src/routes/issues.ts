@@ -108,6 +108,7 @@ import {
   setIssueExecutionPolicyMonitorScheduledBy,
 } from "../services/issue-execution-policy.js";
 import { parseIssueExecutionWorkspaceSettings } from "../services/execution-workspace-policy.js";
+import { recoveryService } from "../services/recovery/service.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
@@ -846,6 +847,7 @@ export function issueRoutes(
   const routinesSvc = routineService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
   });
+  const recoverySvc = recoveryService(db, { enqueueWakeup: heartbeat.wakeup });
   const issueTreeControlFactory = Object.prototype.hasOwnProperty.call(
     serviceIndex,
     "issueTreeControlService",
@@ -3220,6 +3222,30 @@ export function issueRoutes(
       };
     }
     await routinesSvc.syncRunStatusForIssue(issue.id);
+
+    if (
+      existing.originKind === "stale_active_run_evaluation" &&
+      existing.status !== "done" &&
+      issue.status === "done"
+    ) {
+      try {
+        await recoverySvc.autoRecordContinueOnStaleEvaluationClose({
+          evaluationIssueId: issue.id,
+          actor:
+            actor.actorType === "agent" && actor.agentId
+              ? { type: "agent", agentId: actor.agentId }
+              : actor.actorType === "user"
+                ? { type: "user", userId: actor.actorId }
+                : { type: "system" },
+          closedByRunId: actor.runId ?? null,
+        });
+      } catch (err) {
+        logger.warn(
+          { err, issueId: issue.id },
+          "failed to auto-record implicit continue watchdog decision on stale-active-run evaluation close",
+        );
+      }
+    }
 
     if (actor.runId) {
       await heartbeat.reportRunActivity(actor.runId).catch((err) =>

@@ -406,6 +406,108 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(evaluations.filter((issue) => !["done", "cancelled"].includes(issue.status))).toHaveLength(1);
   });
 
+  it("auto-records an implicit continue when a stale-active-run evaluation closes done", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn() });
+
+    const scan = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    const evaluationIssueId = scan.evaluationIssueIds[0];
+    expect(evaluationIssueId).toBeTruthy();
+
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, evaluationIssueId));
+
+    const result = await recovery.autoRecordContinueOnStaleEvaluationClose({
+      evaluationIssueId,
+      actor: { type: "agent", agentId: managerId },
+      now,
+    });
+    expect(result).toMatchObject({ recorded: true, reason: "recorded" });
+
+    const decisionRows = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.evaluationIssueId, evaluationIssueId),
+        ),
+      );
+    expect(decisionRows).toHaveLength(1);
+    expect(decisionRows[0]).toMatchObject({
+      decision: "continue",
+      createdByAgentId: managerId,
+    });
+    const rearmAt = new Date(now.getTime() + ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS);
+    expect(decisionRows[0]?.snoozedUntil?.toISOString()).toBe(rearmAt.toISOString());
+
+    // Next scan within the re-arm window MUST NOT create a fresh evaluation for the same run.
+    const beforeRearm = await heartbeat.scanSilentActiveRuns({
+      now: new Date(rearmAt.getTime() - 60_000),
+      companyId,
+    });
+    expect(beforeRearm).toMatchObject({ created: 0, snoozed: 1 });
+
+    const openEvaluations = await db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.originKind, "stale_active_run_evaluation"),
+          sql`${issues.status} not in ('done', 'cancelled')`,
+        ),
+      );
+    expect(openEvaluations).toHaveLength(0);
+  });
+
+  it("skips the auto-continue when a watchdog decision was just recorded for the same evaluation", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn() });
+
+    const scan = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    const evaluationIssueId = scan.evaluationIssueIds[0];
+    expect(evaluationIssueId).toBeTruthy();
+
+    // Triager called the explicit watchdog endpoint first, then closed the issue.
+    await recovery.recordWatchdogDecision({
+      runId,
+      actor: { type: "agent", agentId: managerId },
+      decision: "continue",
+      evaluationIssueId,
+      reason: "Explicit continue",
+      now,
+    });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, evaluationIssueId));
+
+    const result = await recovery.autoRecordContinueOnStaleEvaluationClose({
+      evaluationIssueId,
+      actor: { type: "agent", agentId: managerId },
+      now: new Date(now.getTime() + 1_000),
+    });
+    expect(result).toMatchObject({ recorded: false, reason: "recent_decision_exists" });
+
+    const decisionRows = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.evaluationIssueId, evaluationIssueId),
+        ),
+      );
+    expect(decisionRows).toHaveLength(1);
+  });
+
   it("rejects agent watchdog decisions using issues not bound to the target run", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const { companyId, managerId, coderId, runId, issuePrefix } = await seedRunningRun({

@@ -64,6 +64,10 @@ const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "ti
 export const ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS = 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS = 4 * 60 * 60 * 1000;
 export const ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS = 30 * 60 * 1000;
+export const ACTIVE_RUN_OUTPUT_AUTO_RECOVERY_THRESHOLD_COUNT = 3;
+const ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_SNOOZE_MS = 30 * 24 * 60 * 60 * 1000;
+const ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_REASON =
+  "Auto-recovery: source issue blocked and routed to manager after N consecutive watchdog reviews on same run id";
 const ACTIVE_RUN_OUTPUT_EVIDENCE_TAIL_BYTES = 8 * 1024;
 const STRANDED_ISSUE_RECOVERY_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.strandedIssueRecovery;
 const STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND = RECOVERY_ORIGIN_KINDS.staleActiveRunEvaluation;
@@ -84,6 +88,35 @@ type RecoveryWakeup = (
   agentId: string,
   opts?: RecoveryWakeupOptions,
 ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
+
+// Public run-cancel primitive shipped by AZU-2928. Returns the canceled run
+// when termination succeeded, or `null` when the run was already terminal and
+// no kill was required. Throws when the cancel call itself fails.
+export type RecoveryStuckRunCanceller = (
+  runId: string,
+  reason: string,
+  options?: { errorCode?: string },
+) => Promise<typeof heartbeatRuns.$inferSelect | null>;
+
+// In-process auto-cancel of a stuck active run is only triggered after this many
+// consecutive `scanSilentActiveRuns` cycles have observed the same run still
+// stuck with an open watchdog evaluation that no one resolved. Keep conservative —
+// preserves the first-time human-gate but unblocks the AZU-2914→AZU-2923 pattern.
+export const STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES = 5;
+const STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE = "heartbeat.output_stale_unresolved_cycle";
+const STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE = "heartbeat.output_stale_auto_cancelled";
+
+// Auto-recovery termination outcome captured for downstream metadata (escalation
+// comment, decision row, activity log). AZU-2934 Layer 2b contract: the
+// `auto_recovered` step now terminates the live run *before* reassigning the
+// source issue, and termination failure must NOT block reassignment.
+type StaleRunAutoRecoveryTerminationOutcome =
+  | { kind: "succeeded"; cancelReason: string; errorCode: string }
+  | { kind: "failed"; errorMessage: string }
+  | { kind: "not_applicable"; reason: "canceller_not_wired" | "run_already_terminal" };
+
+const STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE =
+  "auto_recovered_after_consecutive_reviews";
 
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
@@ -388,7 +421,10 @@ function buildLivenessOriginalIssueComment(finding: IssueLivenessFinding, escala
   ].join("\n");
 }
 
-export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup }) {
+export function recoveryService(
+  db: Db,
+  deps: { enqueueWakeup: RecoveryWakeup; cancelStuckRun?: RecoveryStuckRunCanceller },
+) {
   const issuesSvc = issueService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -690,7 +726,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         and(
           eq(heartbeatRunWatchdogDecisions.companyId, companyId),
           eq(heartbeatRunWatchdogDecisions.runId, runId),
-          inArray(heartbeatRunWatchdogDecisions.decision, ["snooze", "continue"]),
+          inArray(heartbeatRunWatchdogDecisions.decision, ["snooze", "continue", "auto_recovered"]),
           gt(heartbeatRunWatchdogDecisions.snoozedUntil, now),
         ),
       )
@@ -1023,6 +1059,192 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return true;
   }
 
+  async function countPriorWatchdogReviewDecisions(companyId: string, runId: string) {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.companyId, companyId),
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          inArray(heartbeatRunWatchdogDecisions.decision, ["continue", "dismissed_false_positive"]),
+        ),
+      );
+    return row?.count ?? 0;
+  }
+
+  async function findPriorStaleRunEvaluationIdentifiers(companyId: string, runId: string) {
+    const rows = await db
+      .select({ identifier: issues.identifier, id: issues.id })
+      .from(issues)
+      .where(
+        and(
+          eq(issues.companyId, companyId),
+          eq(issues.originKind, STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND),
+          eq(issues.originId, runId),
+          isNull(issues.hiddenAt),
+        ),
+      )
+      .orderBy(desc(issues.createdAt));
+    return rows;
+  }
+
+  function formatStaleRunAutoRecoveryTerminationOutcome(
+    outcome: StaleRunAutoRecoveryTerminationOutcome,
+  ): string {
+    switch (outcome.kind) {
+      case "succeeded":
+        return `succeeded (cancel reason: \`${outcome.cancelReason}\`, error code: \`${outcome.errorCode}\`)`;
+      case "failed":
+        return `failed (${outcome.errorMessage}); owner must triage the live process by hand`;
+      case "not_applicable":
+        return outcome.reason === "canceller_not_wired"
+          ? "not attempted (control-plane cancel primitive not wired into this deployment)"
+          : "not required (run was already terminal when cancel was attempted)";
+    }
+  }
+
+  function serializeStaleRunAutoRecoveryTerminationOutcome(
+    outcome: StaleRunAutoRecoveryTerminationOutcome,
+  ): string {
+    switch (outcome.kind) {
+      case "succeeded":
+        return "succeeded";
+      case "failed":
+        return "failed";
+      case "not_applicable":
+        return `not_applicable:${outcome.reason}`;
+    }
+  }
+
+  async function executeStaleRunAutoRecovery(input: {
+    run: typeof heartbeatRuns.$inferSelect;
+    runningAgent: typeof agents.$inferSelect;
+    sourceIssue: typeof issues.$inferSelect | null;
+    priorReviewCount: number;
+    now: Date;
+  }) {
+    const ownerAgentId = await resolveStaleRunOwnerAgentId({
+      run: input.run,
+      runningAgent: input.runningAgent,
+      sourceIssue: input.sourceIssue,
+    });
+    const priorEvals = await findPriorStaleRunEvaluationIdentifiers(input.run.companyId, input.run.id);
+    const priorEvalLines = priorEvals
+      .map((row) => `  - ${row.identifier ?? row.id}`)
+      .join("\n");
+    const ownerLabel = ownerAgentId ?? "no recovery owner could be resolved";
+
+    // AZU-2934 Layer 2b: terminate the live run via the AZU-2928 public cancel
+    // primitive BEFORE reassigning the source issue. Termination failure is
+    // recorded but never blocks the reassignment / comment / snooze decision.
+    let terminationOutcome: StaleRunAutoRecoveryTerminationOutcome;
+    if (!deps.cancelStuckRun) {
+      terminationOutcome = { kind: "not_applicable", reason: "canceller_not_wired" };
+    } else {
+      const cancelReason = `auto_recovered_after_${input.priorReviewCount}_consecutive_watchdog_reviews`;
+      try {
+        const canceled = await deps.cancelStuckRun(input.run.id, cancelReason, {
+          errorCode: STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE,
+        });
+        terminationOutcome = canceled
+          ? {
+              kind: "succeeded",
+              cancelReason,
+              errorCode: STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE,
+            }
+          : { kind: "not_applicable", reason: "run_already_terminal" };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { err, runId: input.run.id, priorReviewCount: input.priorReviewCount },
+          "watchdog auto-recovery cancel call failed; proceeding with source-issue reassignment",
+        );
+        terminationOutcome = { kind: "failed", errorMessage };
+      }
+    }
+
+    if (input.sourceIssue && !["done", "cancelled"].includes(input.sourceIssue.status)) {
+      const updatePayload: { status?: string; assigneeAgentId?: string | null } = { status: "blocked" };
+      if (ownerAgentId) updatePayload.assigneeAgentId = ownerAgentId;
+      await issuesSvc.update(input.sourceIssue.id, updatePayload);
+      await issuesSvc.addComment(
+        input.sourceIssue.id,
+        [
+          `Watchdog auto-recovery fired after ${input.priorReviewCount} consecutive reviews on run \`${input.run.id}\` without recovery.`,
+          "",
+          "The source issue is now blocked and routed to the named unblock owner. No further evaluation issues will be spawned for this run by the watchdog.",
+          "",
+          `- Run id: \`${input.run.id}\``,
+          `- Running agent: ${input.runningAgent.name}`,
+          `- Unblock owner: ${ownerLabel}`,
+          `- Prior watchdog reviews on this run:${priorEvalLines ? `\n${priorEvalLines}` : " (none indexed)"}`,
+          `- Live-run termination: ${formatStaleRunAutoRecoveryTerminationOutcome(terminationOutcome)}`,
+        ].join("\n"),
+        { runId: input.run.id },
+      );
+    }
+
+    await db.insert(heartbeatRunWatchdogDecisions).values({
+      companyId: input.run.companyId,
+      runId: input.run.id,
+      evaluationIssueId: null,
+      decision: "auto_recovered",
+      snoozedUntil: new Date(input.now.getTime() + ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_SNOOZE_MS),
+      reason: `${ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_REASON} | termination=${serializeStaleRunAutoRecoveryTerminationOutcome(terminationOutcome)}`,
+      createdByAgentId: null,
+      createdByUserId: null,
+      createdByRunId: null,
+    });
+
+    await logActivity(db, {
+      companyId: input.run.companyId,
+      actorType: "system",
+      actorId: "system",
+      agentId: ownerAgentId,
+      runId: input.run.id,
+      action: "heartbeat.output_stale_auto_recovered",
+      entityType: "heartbeat_run",
+      entityId: input.run.id,
+      details: {
+        source: "recovery.scan_silent_active_runs",
+        priorReviewCount: input.priorReviewCount,
+        thresholdCount: ACTIVE_RUN_OUTPUT_AUTO_RECOVERY_THRESHOLD_COUNT,
+        sourceIssueId: input.sourceIssue?.id ?? null,
+        unblockOwnerAgentId: ownerAgentId,
+        priorEvaluationIssueIds: priorEvals.map((row) => row.id),
+        terminationOutcome,
+      },
+    });
+
+    if (ownerAgentId) {
+      await deps.enqueueWakeup(ownerAgentId, {
+        source: "assignment",
+        triggerDetail: "system",
+        reason: "issue_assigned",
+        payload: input.sourceIssue
+          ? withRecoveryModelProfileHint({
+              issueId: input.sourceIssue.id,
+              staleRunId: input.run.id,
+              autoRecovered: true,
+            })
+          : { staleRunId: input.run.id, autoRecovered: true },
+        requestedByActorType: "system",
+        requestedByActorId: null,
+        contextSnapshot: input.sourceIssue
+          ? withRecoveryModelProfileHint({
+              issueId: input.sourceIssue.id,
+              taskId: input.sourceIssue.id,
+              wakeReason: "issue_assigned",
+              source: STALE_ACTIVE_RUN_EVALUATION_ORIGIN_KIND,
+              staleRunId: input.run.id,
+              autoRecovered: true,
+            })
+          : { staleRunId: input.run.id, autoRecovered: true },
+      });
+    }
+  }
+
   async function createOrUpdateStaleRunEvaluation(input: {
     run: typeof heartbeatRuns.$inferSelect;
     now: Date;
@@ -1067,6 +1289,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         });
       }
       return { kind: "existing" as const, evaluationIssueId: existing.id };
+    }
+
+    const priorReviewCount = await countPriorWatchdogReviewDecisions(input.run.companyId, input.run.id);
+    if (priorReviewCount >= ACTIVE_RUN_OUTPUT_AUTO_RECOVERY_THRESHOLD_COUNT) {
+      await executeStaleRunAutoRecovery({
+        run: input.run,
+        runningAgent,
+        sourceIssue,
+        priorReviewCount,
+        now: input.now,
+      });
+      return { kind: "auto_recovered" as const };
     }
 
     const ownerAgentId = await resolveStaleRunOwnerAgentId({ run: input.run, runningAgent, sourceIssue });
@@ -1153,6 +1387,45 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return { kind: "created" as const, evaluationIssueId: evaluation.id };
   }
 
+  async function appendStuckRunCycleEvent(
+    run: typeof heartbeatRuns.$inferSelect,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ) {
+    const [seqRow] = await db
+      .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, run.id));
+    const nextSeq = Number(seqRow?.maxSeq ?? 0) + 1;
+    await db.insert(heartbeatRunEvents).values({
+      companyId: run.companyId,
+      runId: run.id,
+      agentId: run.agentId,
+      seq: nextSeq,
+      eventType,
+      stream: "system",
+      level: "warn",
+      message:
+        eventType === STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE
+          ? "stuck run auto-cancelled by watchdog after exhausted eval cycles"
+          : "stuck run still unresolved at watchdog scan",
+      payload,
+    });
+  }
+
+  async function countUnresolvedStuckRunCycles(runId: string) {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE),
+        ),
+      );
+    return Number(row?.count ?? 0);
+  }
+
   async function scanSilentActiveRuns(opts?: { now?: Date; companyId?: string }) {
     const now = opts?.now ?? new Date();
     const suspicionBefore = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS);
@@ -1176,6 +1449,8 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       snoozed: 0,
       skipped: 0,
+      autoCancelled: 0,
+      autoRecovered: 0,
       evaluationIssueIds: [] as string[],
     };
 
@@ -1188,9 +1463,62 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       if (outcome.kind === "created") result.created += 1;
       else if (outcome.kind === "existing") result.existing += 1;
       else if (outcome.kind === "escalated") result.escalated += 1;
+      else if (outcome.kind === "auto_recovered") result.autoRecovered += 1;
       else result.skipped += 1;
       if ("evaluationIssueId" in outcome && outcome.evaluationIssueId) {
         result.evaluationIssueIds.push(outcome.evaluationIssueId);
+      }
+
+      // The eval-issue path filed an issue (or escalated an existing one) but
+      // nothing about the stuck run itself has changed yet. Count this as one
+      // unresolved cycle, and if we have observed enough consecutive
+      // unresolved cycles, auto-terminate via the in-process canceller (when
+      // wired). This preserves the human-gate for first detection but
+      // unblocks the AZU-2914 → AZU-2923 storm pattern where eval issues
+      // pile up unattended.
+      if (outcome.kind === "existing" || outcome.kind === "escalated") {
+        await appendStuckRunCycleEvent(run, STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE, {
+          evaluationIssueId: "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+          silenceLastOutputAt: run.lastOutputAt?.toISOString() ?? null,
+        });
+        if (deps.cancelStuckRun) {
+          const unresolvedCycles = await countUnresolvedStuckRunCycles(run.id);
+          if (unresolvedCycles >= STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES) {
+            const reason = `stuck_terminated_by_watchdog: ${unresolvedCycles} unresolved watchdog eval cycles`;
+            try {
+              await deps.cancelStuckRun(run.id, reason, {
+                errorCode: "stuck_terminated_by_watchdog",
+              });
+              await appendStuckRunCycleEvent(run, STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE, {
+                unresolvedCycles,
+                evaluationIssueId:
+                  "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+              });
+              await logActivity(db, {
+                companyId: run.companyId,
+                actorType: "system",
+                actorId: "system",
+                runId: run.id,
+                action: "heartbeat.output_stale_auto_cancelled",
+                entityType: "heartbeat_run",
+                entityId: run.id,
+                details: {
+                  source: "recovery.scan_silent_active_runs",
+                  unresolvedCycles,
+                  threshold: STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES,
+                  evaluationIssueId:
+                    "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+                },
+              });
+              result.autoCancelled += 1;
+            } catch (err) {
+              logger.error(
+                { err, runId: run.id, unresolvedCycles },
+                "watchdog auto-cancel of stuck run failed",
+              );
+            }
+          }
+        }
       }
     }
 

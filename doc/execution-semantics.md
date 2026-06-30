@@ -360,6 +360,21 @@ Operators should prefer `snooze` for known time-bounded quiet periods. `continue
 
 The board can record watchdog decisions. The assigned owner of an issue-backed watchdog evaluation can also record them. Other agents cannot.
 
+### Auto-Recovery After Repeated Watchdog Reviews
+
+When the same run id has accumulated `ACTIVE_RUN_OUTPUT_AUTO_RECOVERY_THRESHOLD_COUNT` (default 3) prior watchdog review decisions (`continue` or `dismissed_false_positive`), the scan stops spawning new `stale_active_run_evaluation` issues for that run. Instead, the recovery service executes a one-shot auto-recovery:
+
+- resolve the source issue's manager via the standard `reports-to` chain (source assignee → running agent → CTO/CEO fallback) used for stale-run owner resolution
+- **terminate the live run via the public control-plane cancel primitive** (AZU-2928's `POST /api/runs/:id/cancel`, wired into the recovery service as the optional `cancelStuckRun` dependency) *before* reassigning the source issue; the cancel call passes a structured `reason` of `auto_recovered_after_<N>_consecutive_watchdog_reviews` and `errorCode` `auto_recovered_after_consecutive_reviews`
+- reassign the source issue to that manager and set it to `blocked` with the watchdog cause and a consolidated reference to the prior review issue identifiers
+- post one consolidated escalation comment on the source issue (replacing what would otherwise be the Nth duplicate review) — the comment ends with a `Live-run termination:` line that records the termination outcome (`succeeded` / `failed: <message>` / `not_applicable:<reason>`) — and wake the manager
+- record an `auto_recovered` watchdog decision with a 30-day default snooze so the periodic scan does not re-fire on the same run id while the manager triages; the decision `reason` is appended with `| termination=<outcome>` so the outcome is recoverable from the decisions table alone
+- emit a `heartbeat.output_stale_auto_recovered` run-event for audit, with structured `terminationOutcome` (kind + per-kind fields) in the activity-log `details`
+
+Termination failure does **not** block the source-issue reassignment, consolidated comment, or snooze decision: the cancel call is wrapped, errors are logged, and the recovery proceeds with `terminationOutcome.kind = "failed"` so the manager picks up an explicitly-flagged still-running process. When the `cancelStuckRun` dependency is not wired (older deployments without AZU-2928), the outcome is `not_applicable:canceller_not_wired` and prior-contract behavior (manager triages the live process by hand) is preserved.
+
+`auto_recovered` is a recovery-service-recorded decision, not an operator-recordable one. It participates in `latestActiveOutputQuietUntilDecision` the same way `snooze` does for the purpose of suppressing further scan-created review work.
+
 ## 11. Auto-Recover vs Explicit Recovery vs Human Escalation
 
 Paperclip uses three different recovery outcomes, depending on how much it can safely infer.

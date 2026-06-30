@@ -5,6 +5,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
   issueRelations,
@@ -20,7 +21,10 @@ import {
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
   heartbeatService,
 } from "../services/heartbeat.ts";
-import { recoveryService } from "../services/recovery/service.ts";
+import {
+  recoveryService,
+  STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES,
+} from "../services/recovery/service.ts";
 import { getRunLogStore } from "../services/run-log-store.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -269,6 +273,176 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
 
     const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
     expect(source?.status).toBe("blocked");
+  });
+
+  it("auto-recovers after N consecutive watchdog reviews on the same run id (AZU-2927)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId, coderId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    // Simulate three prior watchdog reviews where the triager closed `done` and
+    // (via AZU-2899's implicit-continue path) a `continue` decision was recorded.
+    // The fourth scan tick should hit the N=3 auto-recovery branch instead of
+    // spawning another eval issue.
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      created: 0,
+      autoRecovered: 1,
+    });
+
+    // No new evaluation issue should have been created.
+    const evaluations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(evaluations).toHaveLength(0);
+
+    // Source issue blocked and routed to the manager (reportsTo of the running coder).
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+    expect(source?.assigneeAgentId).not.toBe(coderId);
+
+    // Terminal `auto_recovered` decision row inserted.
+    const decisions = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(and(eq(heartbeatRunWatchdogDecisions.runId, runId), eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered")));
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.snoozedUntil).toBeTruthy();
+
+    // AZU-2934 Layer 2b: the heartbeatService path now threads `cancelStuckRun`
+    // into recoveryService (heartbeat.ts), so the run is killed before the
+    // source-issue reassignment and the decision row records the structured
+    // termination outcome. End-to-end proves the wiring reaches the production
+    // path; the not-wired and failure branches are covered by the two dedicated
+    // recovery-service tests below.
+    expect(decisions[0]?.reason).toContain("termination=succeeded");
+
+    // Subsequent scan ticks must not retrigger recovery — either because the
+    // auto_recovered snooze gates the decision (when the canceller wasn't wired
+    // and the run is still running) or because the cancelled run is no longer
+    // active (when Layer 2b's cancel succeeded and terminated the run).
+    const followup = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(followup).toMatchObject({ created: 0, autoRecovered: 0 });
+  });
+
+  it("terminates the live run via the cancel primitive when wired (AZU-2934)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const cancelStuckRun = vi.fn(async (id: string) => {
+      const [updated] = await db
+        .update(heartbeatRuns)
+        .set({ status: "cancelled" })
+        .where(eq(heartbeatRuns.id, id))
+        .returning();
+      return updated ?? null;
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(), cancelStuckRun });
+
+    const result = await recovery.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ scanned: 1, created: 0, autoRecovered: 1 });
+
+    // The cancel primitive was called with the AZU-2934 structured reason and
+    // error code, BEFORE the source-issue reassignment.
+    expect(cancelStuckRun).toHaveBeenCalledTimes(1);
+    expect(cancelStuckRun).toHaveBeenCalledWith(
+      runId,
+      "auto_recovered_after_3_consecutive_watchdog_reviews",
+      { errorCode: "auto_recovered_after_consecutive_reviews" },
+    );
+
+    // Source issue still reassigned + blocked.
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+
+    // Decision row encodes termination=succeeded.
+    const [decision] = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered"),
+        ),
+      );
+    expect(decision?.reason).toContain("termination=succeeded");
+  });
+
+  it("completes auto-recovery even if the cancel call fails (AZU-2934)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const cancelStuckRun = vi.fn(async () => {
+      throw new Error("cancel-endpoint-unreachable");
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(), cancelStuckRun });
+
+    const result = await recovery.scanSilentActiveRuns({ now, companyId });
+
+    // Recovery still completes — terminate failure does NOT block reassignment,
+    // comment, or snooze.
+    expect(result).toMatchObject({ scanned: 1, created: 0, autoRecovered: 1 });
+    expect(cancelStuckRun).toHaveBeenCalledTimes(1);
+
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+
+    const [decision] = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered"),
+        ),
+      );
+    expect(decision?.reason).toContain("termination=failed");
   });
 
   it("skips snoozed runs and healthy noisy runs", async () => {
@@ -546,5 +720,89 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       createdByRunId: randomUUID(),
     });
     expect(decision.createdByRunId).toBe(managerRunId);
+  });
+
+  it("appends an unresolved-cycle event each scan after the initial evaluation issue is filed", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const first = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(first.created).toBe(1);
+
+    const second = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    const third = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(second.existing).toBe(1);
+    expect(third.existing).toBe(1);
+
+    const events = await db
+      .select({ eventType: heartbeatRunEvents.eventType })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, "heartbeat.output_stale_unresolved_cycle"),
+        ),
+      );
+    expect(events.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("auto-cancels a stuck run after N unresolved watchdog cycles when the canceller is wired", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    // First call creates the evaluation issue (not counted as unresolved).
+    await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    // Subsequent calls each tally one unresolved cycle; after the threshold,
+    // the in-process canceller fires.
+    for (let i = 0; i < STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES; i += 1) {
+      await heartbeat.scanSilentActiveRuns({ now, companyId });
+    }
+
+    const [run] = await db
+      .select({ id: heartbeatRuns.id, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("stuck_terminated_by_watchdog");
+
+    const [autoCancelEvent] = await db
+      .select({ eventType: heartbeatRunEvents.eventType })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, "heartbeat.output_stale_auto_cancelled"),
+        ),
+      );
+    expect(autoCancelEvent).toBeTruthy();
+  });
+
+  it("does not auto-cancel when only the recovery service is exercised without the in-process canceller", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn() });
+
+    await recovery.scanSilentActiveRuns({ now, companyId });
+    for (let i = 0; i < STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES + 2; i += 1) {
+      await recovery.scanSilentActiveRuns({ now, companyId });
+    }
+
+    const [run] = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(run?.status).toBe("running");
   });
 });

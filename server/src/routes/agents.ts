@@ -3205,24 +3205,116 @@ export function agentRoutes(
   });
 
   router.post("/heartbeat-runs/:runId/cancel", async (req, res) => {
-    assertBoard(req);
     const runId = req.params.runId as string;
     const existing = await heartbeat.getRun(runId);
-    if (existing) {
-      assertCompanyAccess(req, existing.companyId);
+    if (!existing) {
+      res.status(404).json({ error: "Heartbeat run not found" });
+      return;
     }
-    const run = await heartbeat.cancelRun(runId);
+    assertCompanyAccess(req, existing.companyId);
+
+    const requestedReason =
+      typeof req.body?.reason === "string"
+        ? req.body.reason.trim().slice(0, 500) || null
+        : null;
+
+    // Determine caller identity:
+    //  - board: full break-glass — no stuck-verification gate.
+    //  - agent (peer): allowed for same-company callers, but the run must
+    //    look genuinely stuck so peer agents can't kill arbitrary live work.
+    //  - anything else: forbidden.
+    let callerLabel: string;
+    let actorType: "user" | "agent";
+    let actorId: string;
+    let agentIdForLog: string | null = null;
+
+    if (req.actor.type === "board") {
+      callerLabel = "board";
+      actorType = "user";
+      actorId = req.actor.userId ?? "board";
+    } else if (req.actor.type === "agent" && req.actor.agentId) {
+      const silence = await heartbeat.buildRunOutputSilence(existing);
+      const isStuck = existing.status === "running" && silence.level === "critical";
+      if (!isStuck) {
+        res.status(409).json({
+          error:
+            "Run is not in a verified stuck state. Only the board can cancel a non-stuck run.",
+          status: existing.status,
+          silenceLevel: silence.level,
+          silenceAgeMs: silence.silenceAgeMs,
+          criticalThresholdMs: silence.criticalThresholdMs,
+        });
+        return;
+      }
+      const [callerAgent] = await db
+        .select({ id: agentsTable.id, role: agentsTable.role })
+        .from(agentsTable)
+        .where(eq(agentsTable.id, req.actor.agentId))
+        .limit(1);
+      callerLabel = callerAgent?.role ?? "agent";
+      actorType = "agent";
+      actorId = req.actor.agentId;
+      agentIdForLog = req.actor.agentId;
+    } else {
+      throw forbidden("Board or peer-agent identity required to cancel a heartbeat run");
+    }
+
+    const fullReason = requestedReason
+      ? `stuck_terminated_by_${callerLabel}: ${requestedReason}`
+      : `stuck_terminated_by_${callerLabel}`;
+    const errorCode = `stuck_terminated_by_${callerLabel}`;
+
+    const run = await heartbeat.cancelRun(runId, fullReason, { errorCode });
 
     if (run) {
       await logActivity(db, {
         companyId: run.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
+        actorType,
+        actorId,
+        agentId: agentIdForLog,
+        runId: req.actor.runId ?? null,
         action: "heartbeat.cancelled",
         entityType: "heartbeat_run",
         entityId: run.id,
-        details: { agentId: run.agentId },
+        details: {
+          agentId: run.agentId,
+          callerLabel,
+          errorCode,
+          reason: requestedReason,
+        },
       });
+
+      // Telemetry comment on the source issue, mirroring the recovery-service
+      // pattern. Best-effort — comment failure must not mask the cancel.
+      try {
+        const contextSnapshot = run.contextSnapshot as Record<string, unknown> | null;
+        const sourceIssueId =
+          typeof contextSnapshot?.issueId === "string"
+            ? contextSnapshot.issueId
+            : typeof contextSnapshot?.taskId === "string"
+              ? contextSnapshot.taskId
+              : null;
+        if (sourceIssueId) {
+          const issuesSvc = issueService(db);
+          await issuesSvc.addComment(
+            sourceIssueId,
+            [
+              `Paperclip cancelled stuck active run \`${run.id}\` via control-plane API.`,
+              "",
+              `- Caller: ${callerLabel}`,
+              `- Error code: \`${errorCode}\``,
+              requestedReason ? `- Reason: ${requestedReason}` : null,
+            ]
+              .filter((line): line is string => line !== null)
+              .join("\n"),
+            { runId: run.id },
+          );
+        }
+      } catch (err) {
+        // Surface but do not fail the response — the run was already cancelled.
+        // eslint-disable-next-line no-console
+        console.warn("heartbeat-run cancel telemetry comment failed", err);
+      }
     }
 
     res.json(run);

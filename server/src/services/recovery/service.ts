@@ -85,6 +85,20 @@ type RecoveryWakeup = (
   opts?: RecoveryWakeupOptions,
 ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
 
+export type RecoveryStuckRunCanceller = (
+  runId: string,
+  reason: string,
+  options?: { errorCode?: string },
+) => Promise<typeof heartbeatRuns.$inferSelect | null>;
+
+// In-process auto-cancel of a stuck active run is only triggered after this many
+// consecutive `scanSilentActiveRuns` cycles have observed the same run still
+// stuck with an open watchdog evaluation that no one resolved. Keep conservative —
+// preserves the first-time human-gate but unblocks the AZU-2914→AZU-2923 pattern.
+export const STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES = 5;
+const STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE = "heartbeat.output_stale_unresolved_cycle";
+const STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE = "heartbeat.output_stale_auto_cancelled";
+
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
   "id" | "agentId" | "status" | "error" | "errorCode" | "contextSnapshot" | "livenessState"
@@ -388,7 +402,10 @@ function buildLivenessOriginalIssueComment(finding: IssueLivenessFinding, escala
   ].join("\n");
 }
 
-export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup }) {
+export function recoveryService(
+  db: Db,
+  deps: { enqueueWakeup: RecoveryWakeup; cancelStuckRun?: RecoveryStuckRunCanceller },
+) {
   const issuesSvc = issueService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -1153,6 +1170,45 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     return { kind: "created" as const, evaluationIssueId: evaluation.id };
   }
 
+  async function appendStuckRunCycleEvent(
+    run: typeof heartbeatRuns.$inferSelect,
+    eventType: string,
+    payload: Record<string, unknown>,
+  ) {
+    const [seqRow] = await db
+      .select({ maxSeq: sql<number | null>`max(${heartbeatRunEvents.seq})` })
+      .from(heartbeatRunEvents)
+      .where(eq(heartbeatRunEvents.runId, run.id));
+    const nextSeq = Number(seqRow?.maxSeq ?? 0) + 1;
+    await db.insert(heartbeatRunEvents).values({
+      companyId: run.companyId,
+      runId: run.id,
+      agentId: run.agentId,
+      seq: nextSeq,
+      eventType,
+      stream: "system",
+      level: "warn",
+      message:
+        eventType === STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE
+          ? "stuck run auto-cancelled by watchdog after exhausted eval cycles"
+          : "stuck run still unresolved at watchdog scan",
+      payload,
+    });
+  }
+
+  async function countUnresolvedStuckRunCycles(runId: string) {
+    const [row] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE),
+        ),
+      );
+    return Number(row?.count ?? 0);
+  }
+
   async function scanSilentActiveRuns(opts?: { now?: Date; companyId?: string }) {
     const now = opts?.now ?? new Date();
     const suspicionBefore = new Date(now.getTime() - ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS);
@@ -1176,6 +1232,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       escalated: 0,
       snoozed: 0,
       skipped: 0,
+      autoCancelled: 0,
       evaluationIssueIds: [] as string[],
     };
 
@@ -1191,6 +1248,58 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       else result.skipped += 1;
       if ("evaluationIssueId" in outcome && outcome.evaluationIssueId) {
         result.evaluationIssueIds.push(outcome.evaluationIssueId);
+      }
+
+      // The eval-issue path filed an issue (or escalated an existing one) but
+      // nothing about the stuck run itself has changed yet. Count this as one
+      // unresolved cycle, and if we have observed enough consecutive
+      // unresolved cycles, auto-terminate via the in-process canceller (when
+      // wired). This preserves the human-gate for first detection but
+      // unblocks the AZU-2914 → AZU-2923 storm pattern where eval issues
+      // pile up unattended.
+      if (outcome.kind === "existing" || outcome.kind === "escalated") {
+        await appendStuckRunCycleEvent(run, STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE, {
+          evaluationIssueId: "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+          silenceLastOutputAt: run.lastOutputAt?.toISOString() ?? null,
+        });
+        if (deps.cancelStuckRun) {
+          const unresolvedCycles = await countUnresolvedStuckRunCycles(run.id);
+          if (unresolvedCycles >= STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES) {
+            const reason = `stuck_terminated_by_watchdog: ${unresolvedCycles} unresolved watchdog eval cycles`;
+            try {
+              await deps.cancelStuckRun(run.id, reason, {
+                errorCode: "stuck_terminated_by_watchdog",
+              });
+              await appendStuckRunCycleEvent(run, STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE, {
+                unresolvedCycles,
+                evaluationIssueId:
+                  "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+              });
+              await logActivity(db, {
+                companyId: run.companyId,
+                actorType: "system",
+                actorId: "system",
+                runId: run.id,
+                action: "heartbeat.output_stale_auto_cancelled",
+                entityType: "heartbeat_run",
+                entityId: run.id,
+                details: {
+                  source: "recovery.scan_silent_active_runs",
+                  unresolvedCycles,
+                  threshold: STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES,
+                  evaluationIssueId:
+                    "evaluationIssueId" in outcome ? outcome.evaluationIssueId : null,
+                },
+              });
+              result.autoCancelled += 1;
+            } catch (err) {
+              logger.error(
+                { err, runId: run.id, unresolvedCycles },
+                "watchdog auto-cancel of stuck run failed",
+              );
+            }
+          }
+        }
       }
     }
 

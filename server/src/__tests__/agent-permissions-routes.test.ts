@@ -72,6 +72,7 @@ const mockHeartbeatService = vi.hoisted(() => ({
   resetRuntimeSession: vi.fn(),
   getRun: vi.fn(),
   cancelRun: vi.fn(),
+  buildRunOutputSilence: vi.fn(),
 }));
 
 const mockIssueApprovalService = vi.hoisted(() => ({
@@ -80,6 +81,7 @@ const mockIssueApprovalService = vi.hoisted(() => ({
 
 const mockIssueService = vi.hoisted(() => ({
   list: vi.fn(),
+  addComment: vi.fn(),
 }));
 
 const mockSecretService = vi.hoisted(() => ({
@@ -202,20 +204,38 @@ function registerModuleMocks() {
   }));
 }
 
-function createDbStub(options: { requireBoardApprovalForNewAgents?: boolean } = {}) {
+function createDbStub(options: {
+  requireBoardApprovalForNewAgents?: boolean;
+  callerAgentRole?: string;
+} = {}) {
+  const companyRows = [{
+    id: companyId,
+    name: "Paperclip",
+    requireBoardApprovalForNewAgents: options.requireBoardApprovalForNewAgents ?? false,
+  }];
+  const agentRows = options.callerAgentRole
+    ? [{ id: agentId, role: options.callerAgentRole }]
+    : [];
   return {
-    select: vi.fn().mockReturnValue({
-      from: vi.fn().mockReturnValue({
-        where: vi.fn().mockReturnValue({
-          then: vi.fn((resolve) =>
-            Promise.resolve(resolve([{
-              id: companyId,
-              name: "Paperclip",
-              requireBoardApprovalForNewAgents: options.requireBoardApprovalForNewAgents ?? false,
-            }])),
-          ),
+    select: vi.fn().mockImplementation(() => {
+      let selectedRows: unknown[] = companyRows;
+      const where = vi.fn().mockReturnValue({
+        // Agent-role lookup terminates with .limit(1) and resolves directly.
+        limit: vi.fn().mockImplementation(() => Promise.resolve(agentRows)),
+        // Company lookup awaits the where() chain via .then.
+        then: vi.fn((resolve) => Promise.resolve(resolve(selectedRows))),
+      });
+      return {
+        from: vi.fn().mockImplementation((table: unknown) => {
+          // Drizzle table objects expose a symbol-tagged name; matching by
+          // shape is brittle so we just use the captured rows above.
+          // companies-table queries go through .then; agents-table queries
+          // go through .limit(1). The where() returned object supports both.
+          void table;
+          selectedRows = companyRows;
+          return { where };
         }),
-      }),
+      };
     }),
   };
 }
@@ -1432,5 +1452,140 @@ describe.sequential("agent permission routes", () => {
 
     expect(res.status).toBe(403);
     expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("allows a peer agent to cancel a stuck active run", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: null,
+    });
+    mockHeartbeatService.buildRunOutputSilence.mockResolvedValue({
+      level: "critical",
+      silenceAgeMs: 60 * 60 * 1000 * 5,
+      criticalThresholdMs: 60 * 60 * 1000 * 4,
+    });
+    mockHeartbeatService.cancelRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "cancelled",
+      contextSnapshot: null,
+    });
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        runId: "caller-run-1",
+      },
+      { callerAgentRole: "cto" },
+    );
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post("/api/heartbeat-runs/run-1/cancel").send({ reason: "watchdog drift" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "run-1",
+      "stuck_terminated_by_cto: watchdog drift",
+      { errorCode: "stuck_terminated_by_cto" },
+    );
+  });
+
+  it("rejects a peer-agent cancel when the run is not in a verified stuck state", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: null,
+    });
+    mockHeartbeatService.buildRunOutputSilence.mockResolvedValue({
+      level: "ok",
+      silenceAgeMs: 60_000,
+      criticalThresholdMs: 60 * 60 * 1000 * 4,
+    });
+
+    const app = await createApp(
+      {
+        type: "agent",
+        agentId,
+        companyId,
+        runId: "caller-run-1",
+      },
+      { callerAgentRole: "cto" },
+    );
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post("/api/heartbeat-runs/run-1/cancel").send({}),
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      status: "running",
+      silenceLevel: "ok",
+    });
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("rejects unauthenticated callers on heartbeat run cancel", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: null,
+    });
+
+    const app = await createApp({ type: "none" });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post("/api/heartbeat-runs/run-1/cancel").send({}),
+    );
+
+    expect(res.status).toBe(401);
+    expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+  });
+
+  it("allows board callers to cancel without stuck verification", async () => {
+    mockHeartbeatService.getRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "running",
+      contextSnapshot: null,
+    });
+    mockHeartbeatService.cancelRun.mockResolvedValue({
+      id: "run-1",
+      companyId,
+      agentId,
+      status: "cancelled",
+      contextSnapshot: null,
+    });
+
+    const app = await createApp({
+      type: "board",
+      userId: "board-user",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post("/api/heartbeat-runs/run-1/cancel").send({ reason: "manual stop" }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(mockHeartbeatService.buildRunOutputSilence).not.toHaveBeenCalled();
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledWith(
+      "run-1",
+      "stuck_terminated_by_board: manual stop",
+      { errorCode: "stuck_terminated_by_board" },
+    );
   });
 });

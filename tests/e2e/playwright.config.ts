@@ -26,7 +26,16 @@ export default defineConfig({
   projects: [
     {
       name: "chromium",
-      use: { browserName: "chromium" },
+      use: {
+        browserName: "chromium",
+        // AZU-2955 Probe D-3: in CI we point Playwright at the system Chrome
+        // binary pre-baked into the runner image (set via
+        // PAPERCLIP_E2E_CHROMIUM_PATH) and skip `playwright install`. Local
+        // devs leave this env unset and Playwright uses its own download.
+        ...(process.env.PAPERCLIP_E2E_CHROMIUM_PATH
+          ? { launchOptions: { executablePath: process.env.PAPERCLIP_E2E_CHROMIUM_PATH } }
+          : {}),
+      },
     },
   ],
   // The webServer directive bootstraps a throwaway instance and then starts it.

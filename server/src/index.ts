@@ -75,6 +75,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  createPostgresUser?: boolean;
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
@@ -296,6 +297,18 @@ export async function startServer(): Promise<StartedServer> {
     const dataDir = resolve(config.embeddedPostgresDataDir);
     const configuredPort = config.embeddedPostgresPort;
     let port = configuredPort;
+    const isProcessRunningAsRoot = (): boolean => {
+      const getuid = (process as NodeJS.Process & { getuid?: () => number }).getuid;
+      return typeof getuid === "function" && getuid() === 0;
+    };
+    const shouldCreateEmbeddedPostgresUser = (): boolean => {
+      const flag = process.env.PAPERCLIP_EMBEDDED_POSTGRES_CREATE_USER?.trim().toLowerCase();
+      if (flag !== "1" && flag !== "true") return false;
+      // embedded-postgres refuses to run as root unless this option provisions
+      // a non-root postgres user. Only honour the flag when we are actually
+      // root so local developers don't unintentionally trigger user-creation.
+      return isProcessRunningAsRoot();
+    };
     const logBuffer = createEmbeddedPostgresLogBuffer(120);
     const verboseEmbeddedPostgresLogs = process.env.PAPERCLIP_EMBEDDED_POSTGRES_VERBOSE === "true";
     const appendEmbeddedPostgresLog = (message: unknown) => {
@@ -388,6 +401,7 @@ export async function startServer(): Promise<StartedServer> {
           port,
           persistent: true,
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+          createPostgresUser: shouldCreateEmbeddedPostgresUser(),
           onLog: appendEmbeddedPostgresLog,
           onError: appendEmbeddedPostgresLog,
         });

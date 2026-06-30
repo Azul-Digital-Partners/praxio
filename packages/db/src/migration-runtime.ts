@@ -18,9 +18,24 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  createPostgresUser?: boolean;
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
+
+function isProcessRunningAsRoot(): boolean {
+  const getuid = (process as NodeJS.Process & { getuid?: () => number }).getuid;
+  return typeof getuid === "function" && getuid() === 0;
+}
+
+function shouldCreatePostgresUser(): boolean {
+  const flag = process.env.PAPERCLIP_EMBEDDED_POSTGRES_CREATE_USER?.trim().toLowerCase();
+  if (flag !== "1" && flag !== "true") return false;
+  // embedded-postgres refuses to run as root unless this option provisions a
+  // non-root postgres user. Only honour the flag when we are actually root so
+  // local developers don't unintentionally trigger user-creation.
+  return isProcessRunningAsRoot();
+}
 
 export type MigrationConnection = {
   connectionString: string;
@@ -141,6 +156,7 @@ async function ensureEmbeddedPostgresConnection(
     port: selectedPort,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+    createPostgresUser: shouldCreatePostgresUser(),
     onLog: logBuffer.append,
     onError: logBuffer.append,
   });

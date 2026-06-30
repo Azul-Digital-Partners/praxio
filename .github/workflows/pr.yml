@@ -252,7 +252,16 @@ jobs:
 
   e2e:
     needs: [policy]
-    runs-on: ubuntu-latest
+    # AZU-2955 Probe D-2: dropped the Playwright container after D-1 failed in
+    # two consecutive runs. D-1 (createPostgresUser flag) was architecturally
+    # complete (see commits 4b10a3e, 71feb45) but embedded-postgres initdb
+    # itself exited 1 inside the Playwright image when running with
+    # createPostgresUser:true (useradd/chown/su path appears incompatible with
+    # the Playwright image's user/permission model). Pivoting to D-2 keeps the
+    # webServer running as the default runner user (non-root) so embedded-
+    # postgres takes its normal happy path. The D-1 code changes are gated and
+    # remain dormant.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
@@ -273,8 +282,40 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright
-        run: npx playwright install --with-deps chromium
+      # AZU-2939 was triggered by `playwright install --with-deps` hanging on
+      # apt-get update. Install Chromium runtime libs explicitly (without
+      # --with-deps) — ubuntu-22.04 runners pre-bake most of these, so this
+      # apt step is fast and idempotent.
+      - name: Install Chromium runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libxkbcommon0 \
+            libpango-1.0-0 \
+            libcairo2 \
+            libasound2
+
+      # AZU-2955 Probe D-3: `npx playwright install chromium` was falsified in
+      # D-2 — three retry attempts on commit 92d49ac all hung after the 100%
+      # download bar (post-download extraction / chrome-headless-shell stage,
+      # not a CDN issue). Skip Playwright self-install entirely and point at
+      # the Google Chrome binary pre-baked into the ubuntu-22.04 runner image
+      # (Playwright's `chromium` project accepts Chrome via executablePath).
+      - name: Verify pre-installed Google Chrome
+        run: |
+          ls -l /usr/bin/google-chrome
+          /usr/bin/google-chrome --version
 
       - name: Generate Paperclip config
         run: |
@@ -294,6 +335,11 @@ jobs:
       - name: Run e2e tests
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
+          # AZU-2955 Probe D-3: point Playwright at the pre-installed Google
+          # Chrome binary and disable its self-install (which hung post-
+          # download in D-2).
+          PAPERCLIP_E2E_CHROMIUM_PATH: /usr/bin/google-chrome
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
         run: pnpm run test:e2e
 
       - name: Upload Playwright report

@@ -312,8 +312,28 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-v1.58.2-${{ runner.os }}
 
+      # AZU-2955: first D-2 run had `npx playwright install chromium` hang on
+      # the Microsoft Playwright CDN past the 30m job timeout. Wrap the install
+      # in a per-attempt timeout + retry so a stalled connection is killed and
+      # a fresh one is opened, instead of consuming the whole job budget on a
+      # single hung download. Each attempt is capped at 5m; we allow 3 attempts.
       - name: Install Playwright Chromium (no apt deps)
-        run: npx playwright install chromium
+        shell: bash
+        run: |
+          set -uo pipefail
+          attempts=3
+          for i in $(seq 1 "$attempts"); do
+            echo "::group::Playwright install attempt $i/$attempts"
+            if timeout 300 npx playwright install chromium; then
+              echo "Playwright install succeeded on attempt $i"
+              echo "::endgroup::"
+              exit 0
+            fi
+            echo "::endgroup::"
+            echo "::warning::Playwright install attempt $i timed out or failed"
+          done
+          echo "::error::Playwright install failed after $attempts attempts"
+          exit 1
 
       - name: Generate Paperclip config
         run: |

@@ -294,6 +294,11 @@ jobs:
       - name: Run e2e tests
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
+          # AZU-2955 (Probe D): the Playwright container runs as root (--user 0).
+          # embedded-postgres refuses to run as root unless `createPostgresUser`
+          # is set; this env var is gated on root in migration-runtime.ts so it
+          # is a no-op for local developers.
+          PAPERCLIP_EMBEDDED_POSTGRES_CREATE_USER: "true"
         run: pnpm run test:e2e
 
       - name: Upload Playwright report

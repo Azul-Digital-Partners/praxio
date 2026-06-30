@@ -18,11 +18,19 @@ const PAPERCLIP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-e2e-home
 // embedded-postgres caches binaries inside the throwaway dir rather than
 // the inherited /root. With the env unset (local dev), the command is
 // unchanged.
+//
+// PAM on jammy strips PATH from `su` even with --preserve-environment
+// (ENV_PATH from /etc/login.defs wins), so explicitly carry PATH and
+// PNPM_HOME from the outer process into the inner shell — otherwise
+// `pnpm` is not on PATH for the dropped user. Mirrors the fix taken in
+// the AZU-2956 sibling workflow path.
 const RAW_WEBSERVER_COMMAND = `pnpm paperclipai onboard --yes --run`;
 const WEBSERVER_DROP_USER = process.env.PAPERCLIP_E2E_WEBSERVER_USER?.trim();
+const OUTER_PATH = process.env.PATH ?? "";
+const OUTER_PNPM_HOME = process.env.PNPM_HOME ?? "";
 const WEBSERVER_COMMAND = WEBSERVER_DROP_USER
   ? `chown -R ${WEBSERVER_DROP_USER} ${JSON.stringify(PAPERCLIP_HOME)} && exec su -p -s /bin/bash ${WEBSERVER_DROP_USER} -c ${JSON.stringify(
-      `HOME=${JSON.stringify(PAPERCLIP_HOME)} ${RAW_WEBSERVER_COMMAND}`,
+      `export PATH=${JSON.stringify(OUTER_PATH)}; export PNPM_HOME=${JSON.stringify(OUTER_PNPM_HOME)}; HOME=${JSON.stringify(PAPERCLIP_HOME)} ${RAW_WEBSERVER_COMMAND}`,
     )}`
   : RAW_WEBSERVER_COMMAND;
 

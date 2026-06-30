@@ -308,13 +308,22 @@ jobs:
       - name: Run e2e tests (as pwuser)
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
+        # PAM on jammy resets PATH for `su` even with --preserve-environment,
+        # so explicitly forward the outer PATH (which actions/setup-node and
+        # pnpm/action-setup populated) into the pwuser shell. Use HOME=/home/pwuser
+        # so paperclipai run reads the config we wrote there.
         run: |
-          su pwuser --preserve-environment --shell /bin/bash -c '
+          OUTER_PATH="$PATH"
+          OUTER_PNPM_HOME="${PNPM_HOME:-}"
+          su pwuser --shell /bin/bash -c "
             set -euo pipefail
+            export PATH='$OUTER_PATH'
+            export PNPM_HOME='$OUTER_PNPM_HOME'
             export HOME=/home/pwuser
-            cd "$GITHUB_WORKSPACE"
+            export PAPERCLIP_E2E_SKIP_LLM=true
+            cd '$GITHUB_WORKSPACE'
             pnpm run test:e2e
-          '
+          "
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4

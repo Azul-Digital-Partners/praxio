@@ -326,9 +326,123 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(decisions).toHaveLength(1);
     expect(decisions[0]?.snoozedUntil).toBeTruthy();
 
-    // Subsequent scan ticks must be silenced by the auto_recovered snooze.
+    // AZU-2934 Layer 2b: the heartbeatService path now threads `cancelStuckRun`
+    // into recoveryService (heartbeat.ts), so the run is killed before the
+    // source-issue reassignment and the decision row records the structured
+    // termination outcome. End-to-end proves the wiring reaches the production
+    // path; the not-wired and failure branches are covered by the two dedicated
+    // recovery-service tests below.
+    expect(decisions[0]?.reason).toContain("termination=succeeded");
+
+    // Subsequent scan ticks must not retrigger recovery — either because the
+    // auto_recovered snooze gates the decision (when the canceller wasn't wired
+    // and the run is still running) or because the cancelled run is no longer
+    // active (when Layer 2b's cancel succeeded and terminated the run).
     const followup = await heartbeat.scanSilentActiveRuns({ now, companyId });
-    expect(followup).toMatchObject({ created: 0, autoRecovered: 0, snoozed: 1 });
+    expect(followup).toMatchObject({ created: 0, autoRecovered: 0 });
+  });
+
+  it("terminates the live run via the cancel primitive when wired (AZU-2934)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const cancelStuckRun = vi.fn(async (id: string) => {
+      const [updated] = await db
+        .update(heartbeatRuns)
+        .set({ status: "cancelled" })
+        .where(eq(heartbeatRuns.id, id))
+        .returning();
+      return updated ?? null;
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(), cancelStuckRun });
+
+    const result = await recovery.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({ scanned: 1, created: 0, autoRecovered: 1 });
+
+    // The cancel primitive was called with the AZU-2934 structured reason and
+    // error code, BEFORE the source-issue reassignment.
+    expect(cancelStuckRun).toHaveBeenCalledTimes(1);
+    expect(cancelStuckRun).toHaveBeenCalledWith(
+      runId,
+      "auto_recovered_after_3_consecutive_watchdog_reviews",
+      { errorCode: "auto_recovered_after_consecutive_reviews" },
+    );
+
+    // Source issue still reassigned + blocked.
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+
+    // Decision row encodes termination=succeeded.
+    const [decision] = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered"),
+        ),
+      );
+    expect(decision?.reason).toContain("termination=succeeded");
+  });
+
+  it("completes auto-recovery even if the cancel call fails (AZU-2934)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const cancelStuckRun = vi.fn(async () => {
+      throw new Error("cancel-endpoint-unreachable");
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(), cancelStuckRun });
+
+    const result = await recovery.scanSilentActiveRuns({ now, companyId });
+
+    // Recovery still completes — terminate failure does NOT block reassignment,
+    // comment, or snooze.
+    expect(result).toMatchObject({ scanned: 1, created: 0, autoRecovered: 1 });
+    expect(cancelStuckRun).toHaveBeenCalledTimes(1);
+
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+
+    const [decision] = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(
+        and(
+          eq(heartbeatRunWatchdogDecisions.runId, runId),
+          eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered"),
+        ),
+      );
+    expect(decision?.reason).toContain("termination=failed");
   });
 
   it("skips snoozed runs and healthy noisy runs", async () => {

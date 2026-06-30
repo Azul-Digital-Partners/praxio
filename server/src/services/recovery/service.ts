@@ -89,6 +89,9 @@ type RecoveryWakeup = (
   opts?: RecoveryWakeupOptions,
 ) => Promise<typeof heartbeatRuns.$inferSelect | null>;
 
+// Public run-cancel primitive shipped by AZU-2928. Returns the canceled run
+// when termination succeeded, or `null` when the run was already terminal and
+// no kill was required. Throws when the cancel call itself fails.
 export type RecoveryStuckRunCanceller = (
   runId: string,
   reason: string,
@@ -102,6 +105,18 @@ export type RecoveryStuckRunCanceller = (
 export const STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES = 5;
 const STUCK_RUN_UNRESOLVED_CYCLE_EVENT_TYPE = "heartbeat.output_stale_unresolved_cycle";
 const STUCK_RUN_AUTO_CANCELLED_EVENT_TYPE = "heartbeat.output_stale_auto_cancelled";
+
+// Auto-recovery termination outcome captured for downstream metadata (escalation
+// comment, decision row, activity log). AZU-2934 Layer 2b contract: the
+// `auto_recovered` step now terminates the live run *before* reassigning the
+// source issue, and termination failure must NOT block reassignment.
+type StaleRunAutoRecoveryTerminationOutcome =
+  | { kind: "succeeded"; cancelReason: string; errorCode: string }
+  | { kind: "failed"; errorMessage: string }
+  | { kind: "not_applicable"; reason: "canceller_not_wired" | "run_already_terminal" };
+
+const STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE =
+  "auto_recovered_after_consecutive_reviews";
 
 type LatestIssueRun = Pick<
   typeof heartbeatRuns.$inferSelect,
@@ -1074,6 +1089,34 @@ export function recoveryService(
     return rows;
   }
 
+  function formatStaleRunAutoRecoveryTerminationOutcome(
+    outcome: StaleRunAutoRecoveryTerminationOutcome,
+  ): string {
+    switch (outcome.kind) {
+      case "succeeded":
+        return `succeeded (cancel reason: \`${outcome.cancelReason}\`, error code: \`${outcome.errorCode}\`)`;
+      case "failed":
+        return `failed (${outcome.errorMessage}); owner must triage the live process by hand`;
+      case "not_applicable":
+        return outcome.reason === "canceller_not_wired"
+          ? "not attempted (control-plane cancel primitive not wired into this deployment)"
+          : "not required (run was already terminal when cancel was attempted)";
+    }
+  }
+
+  function serializeStaleRunAutoRecoveryTerminationOutcome(
+    outcome: StaleRunAutoRecoveryTerminationOutcome,
+  ): string {
+    switch (outcome.kind) {
+      case "succeeded":
+        return "succeeded";
+      case "failed":
+        return "failed";
+      case "not_applicable":
+        return `not_applicable:${outcome.reason}`;
+    }
+  }
+
   async function executeStaleRunAutoRecovery(input: {
     run: typeof heartbeatRuns.$inferSelect;
     runningAgent: typeof agents.$inferSelect;
@@ -1092,6 +1135,35 @@ export function recoveryService(
       .join("\n");
     const ownerLabel = ownerAgentId ?? "no recovery owner could be resolved";
 
+    // AZU-2934 Layer 2b: terminate the live run via the AZU-2928 public cancel
+    // primitive BEFORE reassigning the source issue. Termination failure is
+    // recorded but never blocks the reassignment / comment / snooze decision.
+    let terminationOutcome: StaleRunAutoRecoveryTerminationOutcome;
+    if (!deps.cancelStuckRun) {
+      terminationOutcome = { kind: "not_applicable", reason: "canceller_not_wired" };
+    } else {
+      const cancelReason = `auto_recovered_after_${input.priorReviewCount}_consecutive_watchdog_reviews`;
+      try {
+        const canceled = await deps.cancelStuckRun(input.run.id, cancelReason, {
+          errorCode: STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE,
+        });
+        terminationOutcome = canceled
+          ? {
+              kind: "succeeded",
+              cancelReason,
+              errorCode: STALE_RUN_AUTO_RECOVERY_TERMINATION_ERROR_CODE,
+            }
+          : { kind: "not_applicable", reason: "run_already_terminal" };
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        logger.error(
+          { err, runId: input.run.id, priorReviewCount: input.priorReviewCount },
+          "watchdog auto-recovery cancel call failed; proceeding with source-issue reassignment",
+        );
+        terminationOutcome = { kind: "failed", errorMessage };
+      }
+    }
+
     if (input.sourceIssue && !["done", "cancelled"].includes(input.sourceIssue.status)) {
       const updatePayload: { status?: string; assigneeAgentId?: string | null } = { status: "blocked" };
       if (ownerAgentId) updatePayload.assigneeAgentId = ownerAgentId;
@@ -1107,8 +1179,7 @@ export function recoveryService(
           `- Running agent: ${input.runningAgent.name}`,
           `- Unblock owner: ${ownerLabel}`,
           `- Prior watchdog reviews on this run:${priorEvalLines ? `\n${priorEvalLines}` : " (none indexed)"}`,
-          "",
-          "Run termination via the public control-plane API is pending [AZU-2928](/AZU/issues/AZU-2928); for now the owner must triage the run by hand and clear the block when the source issue is recoverable.",
+          `- Live-run termination: ${formatStaleRunAutoRecoveryTerminationOutcome(terminationOutcome)}`,
         ].join("\n"),
         { runId: input.run.id },
       );
@@ -1120,7 +1191,7 @@ export function recoveryService(
       evaluationIssueId: null,
       decision: "auto_recovered",
       snoozedUntil: new Date(input.now.getTime() + ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_SNOOZE_MS),
-      reason: ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_REASON,
+      reason: `${ACTIVE_RUN_OUTPUT_AUTO_RECOVERED_REASON} | termination=${serializeStaleRunAutoRecoveryTerminationOutcome(terminationOutcome)}`,
       createdByAgentId: null,
       createdByUserId: null,
       createdByRunId: null,
@@ -1142,6 +1213,7 @@ export function recoveryService(
         sourceIssueId: input.sourceIssue?.id ?? null,
         unblockOwnerAgentId: ownerAgentId,
         priorEvaluationIssueIds: priorEvals.map((row) => row.id),
+        terminationOutcome,
       },
     });
 

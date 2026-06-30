@@ -276,10 +276,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Generate Paperclip config
+      - name: Generate Paperclip config (under pwuser home)
+        # The e2e webServer runs as pwuser (embedded-postgres refuses uid 0),
+        # so write the bootstrap config into pwuser's home rather than /root.
         run: |
-          mkdir -p ~/.paperclip/instances/default
-          cat > ~/.paperclip/instances/default/config.json << 'CONF'
+          mkdir -p /home/pwuser/.paperclip/instances/default
+          cat > /home/pwuser/.paperclip/instances/default/config.json << 'CONF'
           {
             "$meta": { "version": 1, "updatedAt": "2026-01-01T00:00:00.000Z", "source": "onboard" },
             "database": { "mode": "embedded-postgres" },
@@ -290,11 +292,37 @@ jobs:
             "secrets": { "provider": "local_encrypted", "strictMode": false }
           }
           CONF
+          chown -R pwuser:pwuser /home/pwuser/.paperclip
+
+      - name: Prepare workspace for pwuser
+        # AZU-2957 Probe D: setup steps run as root (--user 0) so apt/pnpm
+        # install work cleanly, but `paperclipai run` (the Playwright
+        # webServer) must drop to pwuser because embedded-postgres refuses
+        # to start under uid 0. Make the workspace and root-owned caches
+        # readable/traversable by pwuser so node_modules symlinks into
+        # root's pnpm store still resolve.
+        run: |
+          chown -R pwuser:pwuser "$GITHUB_WORKSPACE"
+          chmod a+rx /root
+          if [ -d /root/.local/share/pnpm ]; then
+            chmod -R a+rX /root/.local/share/pnpm
+          fi
+          if [ -d /root/.cache ]; then
+            chmod -R a+rX /root/.cache
+          fi
+          if [ -d /opt/hostedtoolcache ]; then
+            chmod -R a+rX /opt/hostedtoolcache || true
+          fi
 
       - name: Run e2e tests
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
-        run: pnpm run test:e2e
+        # `runuser -u pwuser --` drops to uid 1000 while preserving PATH
+        # (so the Node.js toolchain from actions/setup-node and pnpm stay
+        # discoverable) and resetting HOME to /home/pwuser (so embedded-
+        # postgres + Paperclip use a writable, non-root home).
+        run: |
+          runuser -u pwuser -- bash -c 'cd "$GITHUB_WORKSPACE" && pnpm run test:e2e'
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4

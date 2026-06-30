@@ -275,6 +275,62 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
     expect(source?.status).toBe("blocked");
   });
 
+  it("auto-recovers after N consecutive watchdog reviews on the same run id (AZU-2927)", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, managerId, issueId, runId, coderId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+
+    // Simulate three prior watchdog reviews where the triager closed `done` and
+    // (via AZU-2899's implicit-continue path) a `continue` decision was recorded.
+    // The fourth scan tick should hit the N=3 auto-recovery branch instead of
+    // spawning another eval issue.
+    for (let i = 0; i < 3; i += 1) {
+      await db.insert(heartbeatRunWatchdogDecisions).values({
+        companyId,
+        runId,
+        decision: "continue",
+        snoozedUntil: new Date(now.getTime() - (3 - i) * 31 * 60 * 1000),
+        reason: `Prior review #${i + 1} closed done without recovery`,
+      });
+    }
+
+    const heartbeat = heartbeatService(db);
+    const result = await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      created: 0,
+      autoRecovered: 1,
+    });
+
+    // No new evaluation issue should have been created.
+    const evaluations = await db
+      .select()
+      .from(issues)
+      .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stale_active_run_evaluation")));
+    expect(evaluations).toHaveLength(0);
+
+    // Source issue blocked and routed to the manager (reportsTo of the running coder).
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(source?.status).toBe("blocked");
+    expect(source?.assigneeAgentId).toBe(managerId);
+    expect(source?.assigneeAgentId).not.toBe(coderId);
+
+    // Terminal `auto_recovered` decision row inserted.
+    const decisions = await db
+      .select()
+      .from(heartbeatRunWatchdogDecisions)
+      .where(and(eq(heartbeatRunWatchdogDecisions.runId, runId), eq(heartbeatRunWatchdogDecisions.decision, "auto_recovered")));
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]?.snoozedUntil).toBeTruthy();
+
+    // Subsequent scan ticks must be silenced by the auto_recovered snooze.
+    const followup = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(followup).toMatchObject({ created: 0, autoRecovered: 0, snoozed: 1 });
+  });
+
   it("skips snoozed runs and healthy noisy runs", async () => {
     const now = new Date("2026-04-22T20:00:00.000Z");
     const stale = await seedRunningRun({

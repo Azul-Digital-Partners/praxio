@@ -10,7 +10,13 @@ const CLAUDE_AUTH_REQUIRED_RE = /(?:not\s+logged\s+in|please\s+log\s+in|please\s
 const URL_RE = /(https?:\/\/[^\s'"`<>()[\]{};,!?]+[^\s'"`<>()[\]{};,!.?:]+)/gi;
 
 const CLAUDE_TRANSIENT_UPSTREAM_RE =
-  /(?:rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|\b429\b|overloaded(?:_error)?|server\s+overloaded|service\s+unavailable|\b503\b|\b529\b|high\s+demand|try\s+again\s+later|temporarily\s+unavailable|throttl(?:ed|ing)|throttlingexception|servicequotaexceededexception|out\s+of\s+extra\s+usage|extra\s+usage\b|claude\s+usage\s+limit\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|usage\s+limit\s+reached|usage\s+cap\s+reached)/i;
+  /(?:rate[-\s]?limit(?:ed)?|rate_limit_error|too\s+many\s+requests|\b429\b|overloaded(?:_error)?|server\s+overloaded|service\s+unavailable|\b503\b|\b529\b|high\s+demand|try\s+again\s+later|temporarily\s+unavailable|throttl(?:ed|ing)|throttlingexception|servicequotaexceededexception|out\s+of\s+extra\s+usage|extra\s+usage\b|claude\s+usage\s+limit\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|usage\s+limit\s+reached|usage\s+cap\s+reached|invalid\s+authentication\s+credentials?)/i;
+// Scoped 401 match: only treat a bare 401 as transient when it appears next to
+// OAuth/token/credential wording. Anthropic and OAuth proxies emit this when an
+// access token is briefly invalid (e.g. mid-refresh) and the call should be
+// retried before declaring the credential dead.
+const CLAUDE_TRANSIENT_401_RE =
+  /\b401\b[^\n]{0,80}?(?:invalid|authentication|credential|token|oauth|bearer|unauthorized)|(?:invalid|authentication|credential|token|oauth|bearer|unauthorized)[^\n]{0,80}?\b401\b/i;
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,80}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
 
@@ -387,5 +393,5 @@ export function isClaudeTransientUpstreamError(input: {
 
   const haystack = buildClaudeTransientHaystack(input);
   if (!haystack) return false;
-  return CLAUDE_TRANSIENT_UPSTREAM_RE.test(haystack);
+  return CLAUDE_TRANSIENT_UPSTREAM_RE.test(haystack) || CLAUDE_TRANSIENT_401_RE.test(haystack);
 }

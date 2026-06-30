@@ -252,7 +252,15 @@ jobs:
 
   e2e:
     needs: [policy]
-    runs-on: ubuntu-latest
+    # AZU-2958 (parent AZU-2939): pin a specific Ubuntu host and run the job
+    # inside the official Playwright container. The image ships chromium plus
+    # all browser system deps, which avoids the `playwright install --with-deps`
+    # apt-hang reproduced in AZU-2939 / Probe A / Probe B. `--user 0` keeps
+    # checkout + pnpm install working against the root-owned GHA workspace mount.
+    runs-on: ubuntu-22.04
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-jammy
+      options: --user 0
     timeout-minutes: 30
 
     steps:
@@ -273,9 +281,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright
-        run: npx playwright install --with-deps chromium
-
       - name: Generate Paperclip config
         run: |
           mkdir -p ~/.paperclip/instances/default
@@ -291,9 +296,26 @@ jobs:
           }
           CONF
 
+      - name: Hand workspace to pwuser
+        # AZU-2958: the webServer subprocess drops to pwuser (uid 1000) so
+        # embedded-postgres can boot. That subprocess still needs to write
+        # inside the workspace (e.g. node_modules/.cache, populated by
+        # scripts/ensure-plugin-build-deps.mjs on server start), so transfer
+        # ownership of the whole workspace to pwuser. Root retains write
+        # access by virtue of being root, so the Playwright runner can still
+        # populate tests/e2e/test-results/ and tests/e2e/playwright-report/.
+        run: chown -R pwuser:pwuser .
+
       - name: Run e2e tests
         env:
           PAPERCLIP_E2E_SKIP_LLM: "true"
+          # AZU-2958: drop the Playwright `webServer` subprocess (paperclipai
+          # onboard --yes --run) to a non-root user inside the container.
+          # embedded-postgres refuses to run as uid 0; the Playwright image
+          # ships `pwuser` (uid 1000) for exactly this purpose. The Playwright
+          # runner itself stays root so it can write into the root-owned
+          # GHA-mounted workspace (test-results/, playwright-report/).
+          PAPERCLIP_E2E_WEBSERVER_USER: pwuser
         run: pnpm run test:e2e
 
       - name: Upload Playwright report

@@ -252,7 +252,10 @@ jobs:
 
   e2e:
     needs: [policy]
-    runs-on: ubuntu-latest
+    # AZU-2939 probe: pin runner to ubuntu-22.04 to test runner-image as root cause
+    # of the post-Chrome-download Playwright install hang on ubuntu-latest (24.04).
+    # Revert to ubuntu-latest once root cause is confirmed/resolved.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
@@ -274,6 +277,11 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Playwright
+        # AZU-2939 probe: DEBUG=pw:install* surfaces Playwright's internal install
+        # sub-steps so if the post-download hang reproduces here we can see which
+        # phase (extraction, ffmpeg, registration) is stalling.
+        env:
+          DEBUG: pw:install*
         run: npx playwright install --with-deps chromium
 
       - name: Generate Paperclip config

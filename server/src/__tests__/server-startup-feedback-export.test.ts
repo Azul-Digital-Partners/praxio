@@ -137,6 +137,10 @@ vi.mock("../realtime/live-events-ws.js", () => ({
   setupLiveEventsWebSocketServer: vi.fn(),
 }));
 
+vi.mock("../ws/index.js", () => ({
+  attachWebSocketServer: vi.fn(),
+}));
+
 vi.mock("../services/index.js", () => ({
   feedbackService: feedbackServiceFactoryMock,
   heartbeatService: vi.fn(() => ({

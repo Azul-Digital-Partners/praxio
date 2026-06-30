@@ -5,6 +5,7 @@ import {
   agents,
   companies,
   createDb,
+  heartbeatRunEvents,
   heartbeatRunWatchdogDecisions,
   heartbeatRuns,
   issueRelations,
@@ -20,7 +21,10 @@ import {
   ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS,
   heartbeatService,
 } from "../services/heartbeat.ts";
-import { recoveryService } from "../services/recovery/service.ts";
+import {
+  recoveryService,
+  STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES,
+} from "../services/recovery/service.ts";
 import { getRunLogStore } from "../services/run-log-store.ts";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -546,5 +550,89 @@ describeEmbeddedPostgres("active-run output watchdog", () => {
       createdByRunId: randomUUID(),
     });
     expect(decision.createdByRunId).toBe(managerRunId);
+  });
+
+  it("appends an unresolved-cycle event each scan after the initial evaluation issue is filed", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_SUSPICION_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    const first = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(first.created).toBe(1);
+
+    const second = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    const third = await heartbeat.scanSilentActiveRuns({ now, companyId });
+    expect(second.existing).toBe(1);
+    expect(third.existing).toBe(1);
+
+    const events = await db
+      .select({ eventType: heartbeatRunEvents.eventType })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, "heartbeat.output_stale_unresolved_cycle"),
+        ),
+      );
+    expect(events.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("auto-cancels a stuck run after N unresolved watchdog cycles when the canceller is wired", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    const heartbeat = heartbeatService(db);
+
+    // First call creates the evaluation issue (not counted as unresolved).
+    await heartbeat.scanSilentActiveRuns({ now, companyId });
+
+    // Subsequent calls each tally one unresolved cycle; after the threshold,
+    // the in-process canceller fires.
+    for (let i = 0; i < STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES; i += 1) {
+      await heartbeat.scanSilentActiveRuns({ now, companyId });
+    }
+
+    const [run] = await db
+      .select({ id: heartbeatRuns.id, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(run?.status).toBe("cancelled");
+    expect(run?.errorCode).toBe("stuck_terminated_by_watchdog");
+
+    const [autoCancelEvent] = await db
+      .select({ eventType: heartbeatRunEvents.eventType })
+      .from(heartbeatRunEvents)
+      .where(
+        and(
+          eq(heartbeatRunEvents.runId, runId),
+          eq(heartbeatRunEvents.eventType, "heartbeat.output_stale_auto_cancelled"),
+        ),
+      );
+    expect(autoCancelEvent).toBeTruthy();
+  });
+
+  it("does not auto-cancel when only the recovery service is exercised without the in-process canceller", async () => {
+    const now = new Date("2026-04-22T20:00:00.000Z");
+    const { companyId, runId } = await seedRunningRun({
+      now,
+      ageMs: ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS + 60_000,
+    });
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn() });
+
+    await recovery.scanSilentActiveRuns({ now, companyId });
+    for (let i = 0; i < STUCK_RUN_AUTO_CANCEL_UNRESOLVED_CYCLES + 2; i += 1) {
+      await recovery.scanSilentActiveRuns({ now, companyId });
+    }
+
+    const [run] = await db
+      .select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId));
+    expect(run?.status).toBe("running");
   });
 });

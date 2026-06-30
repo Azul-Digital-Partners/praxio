@@ -2337,7 +2337,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     cancelWorkForScope: cancelBudgetScopeWork,
   };
   const budgets = budgetService(db, budgetHooks);
-  const recovery = recoveryService(db, { enqueueWakeup });
+  const recovery = recoveryService(db, {
+    enqueueWakeup,
+    cancelStuckRun: (runId, reason, options) => cancelRunInternal(runId, reason, options),
+  });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
@@ -9360,11 +9363,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return wakeupIds.length;
   }
 
-  async function cancelRunInternal(runId: string, reason = "Cancelled by control plane") {
+  async function cancelRunInternal(
+    runId: string,
+    reason = "Cancelled by control plane",
+    options: { errorCode?: string } = {},
+  ) {
     const run = await getRun(runId);
     if (!run) throw notFound("Heartbeat run not found");
     if (!CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(run.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return run;
     const agent = await getAgent(run.agentId);
+
+    const errorCode = options.errorCode ?? "cancelled";
 
     const running = runningProcesses.get(run.id);
     if (running) {
@@ -9383,11 +9392,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: new Date(),
       error: reason,
-      errorCode: "cancelled",
+      errorCode,
       ...(agent ? {
         resultJson: mergeRunStopMetadataForAgent(agent, "cancelled", {
           resultJson: parseObject(run.resultJson),
-          errorCode: "cancelled",
+          errorCode,
           errorMessage: reason,
         }),
       } : {}),
@@ -9796,7 +9805,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
     },
 
-    cancelRun: (runId: string) => cancelRunInternal(runId),
+    cancelRun: (runId: string, reason?: string, options?: { errorCode?: string }) =>
+      cancelRunInternal(runId, reason, options),
 
     cancelActiveForAgent: (agentId: string) => cancelActiveForAgentInternal(agentId),
 

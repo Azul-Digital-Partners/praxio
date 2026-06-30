@@ -23,6 +23,16 @@ export const SUCCESSFUL_RUN_HANDOFF_OPTIONS = [
   "delegate_or_continue_from_checkpoint",
 ] as const;
 
+/**
+ * Window used by the recovery layer to treat a future routine fire as a
+ * first-class liveness path. A routine trigger that fires within this window
+ * after the heartbeat exits is treated as the next-action owner. Surfaced as a
+ * named constant so this can be tuned later without grepping the heartbeat
+ * service. No pre-existing stale/heartbeat threshold lives in the recovery
+ * layer today (see AZU-2730 spec — "If none exists, default to 24h").
+ */
+export const LINKED_ACTIVE_ROUTINE_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
 const PRODUCTIVE_SUCCESS_LIVENESS_STATES = new Set<RunLivenessState>([
   "advanced",
   "completed",
@@ -341,6 +351,8 @@ export function decideSuccessfulRunHandoff(input: {
   hasPendingInteractionOrApproval: boolean;
   hasExplicitBlockerPath: boolean;
   hasOpenRecoveryIssue: boolean;
+  hasLinkedActiveRoutine: boolean;
+  hasOpenChildIssue: boolean;
   hasPauseHold: boolean;
   budgetBlocked: boolean;
   idempotentWakeExists: boolean;
@@ -377,6 +389,12 @@ export function decideSuccessfulRunHandoff(input: {
   }
   if (input.hasExplicitBlockerPath) return { kind: "skip", reason: "explicit blocker path owns the next action" };
   if (input.hasOpenRecoveryIssue) return { kind: "skip", reason: "open recovery issue owns the ambiguity" };
+  if (input.hasLinkedActiveRoutine) {
+    return { kind: "skip", reason: "linked active routine owns the next wake" };
+  }
+  if (input.hasOpenChildIssue) {
+    return { kind: "skip", reason: "open child issue owns the next wake (issue_children_completed)" };
+  }
   if (input.hasPauseHold) return { kind: "skip", reason: "issue is under an active pause hold" };
   if (input.budgetBlocked) return { kind: "skip", reason: "budget hard stop blocks corrective wake" };
   if (input.idempotentWakeExists) {

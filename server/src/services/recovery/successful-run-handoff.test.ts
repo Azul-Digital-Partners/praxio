@@ -51,6 +51,8 @@ function decide(overrides: Partial<Parameters<typeof decideSuccessfulRunHandoff>
     hasPendingInteractionOrApproval: false,
     hasExplicitBlockerPath: false,
     hasOpenRecoveryIssue: false,
+    hasLinkedActiveRoutine: false,
+    hasOpenChildIssue: false,
     hasPauseHold: false,
     budgetBlocked: false,
     idempotentWakeExists: false,
@@ -122,6 +124,36 @@ describe("successful run handoff decision", () => {
       kind: "skip",
       reason: "explicit blocker path owns the next action",
     });
+  });
+
+  it("does not queue when a linked active routine will own the next wake (AZU-2730)", () => {
+    const decision = decide({ hasLinkedActiveRoutine: true });
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.reason).toMatch(/linked active routine/);
+  });
+
+  it("does not queue when an open child issue will own the next wake (AZU-2730)", () => {
+    const decision = decide({ hasOpenChildIssue: true });
+    expect(decision.kind).toBe("skip");
+    if (decision.kind !== "skip") return;
+    expect(decision.reason).toMatch(/open child issue/);
+  });
+
+  it("still enqueues when no liveness path of any kind exists (AZU-2730 negative case)", () => {
+    const decision = decide({
+      hasActiveExecutionPath: false,
+      hasQueuedWake: false,
+      hasPendingInteractionOrApproval: false,
+      hasExplicitBlockerPath: false,
+      hasOpenRecoveryIssue: false,
+      hasLinkedActiveRoutine: false,
+      hasOpenChildIssue: false,
+      hasPauseHold: false,
+      budgetBlocked: false,
+      idempotentWakeExists: false,
+    });
+    expect(decision.kind).toBe("enqueue");
   });
 
   it("does not queue when a successful run has no progress signal", () => {
